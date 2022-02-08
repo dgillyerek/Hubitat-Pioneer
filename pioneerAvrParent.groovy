@@ -65,23 +65,55 @@ metadata
 }
 
 @Field static List zoneNames = ["N/A", "Main", "Zone 2", "Zone 3", "Zone 4" ]
-@Field static Map zoneNumbers = ["Main":1, "Zone 2":2, "Zone 3":3, "Zone 4":4 ] 
 
 def getVersion()
 {
     return "0.9.210320.1"
 }
 
-void parse(String description) 
+void parse(String resp) 
 {
-    writeLogDebug("parse ${description}")
-    handleReceiverResponse(description)
+    writeLogDebug("parse ${resp}")
+
+    if (resp.length() < 2){
+        return
+    }
+
+    handlePower(resp)
+    handleMute(resp)
+    handleVolume(resp)
 }
 
 @Field static List PowerCommand = ["P", "AP", "BP", "ZE" ]
 @Field static List VolumeCommand = ["V", "Z", "Y" ]
 @Field static List Mute = ["M", "Z2M", "Z3M"]
 //@field static List InputSet ["FN", "ZS", "ZT"]
+
+//ZONE1
+//VOL***
+//  (1step = 0.5dB)
+//  185:+12.0dB
+//  184:+11.5dB
+//  161:0.0dB
+//  001:-80.0dB
+//  000:---.-dB  (MIN)
+
+//ZONE2 & ZONE3
+//ZV**, YV**
+// 00 to 81 by ASCII code.
+// ( 1step=1dB)
+//  81:0.0dB
+//  01:-80.0dB
+//  00:---dB(MIN)
+String TranslateVolumeLevel(Float step, Integer val){
+
+    if (val == 000 || val == 00){
+        return "MIN-db"
+    }
+
+    def start = -80
+    return ((val - 1)/step) + start + "dB"
+}
 
 String getCommand(Integer zone, String command){
 
@@ -124,24 +156,79 @@ String getCommand(Integer zone, String command){
     return sb.toString()
 }
 
-def handleReceiverResponse(String description) 
-{
-    writeLogDebug("handleReceiverResponse ${description}")
+def sendChildZone(Integer zone, String command){
+   def z = getZone(zone)
+   writeLogDebug("sendChild2 " + command)
+   z.fromA("test")
+   z.fromParent("test")
+   z.fromA(45)
+   z.fromA(command)
+}
 
-    
+def sendChildZone(Integer zone, String command, String value ){
+  def z = getZone(zone)
+  writeLogDebug("sendChild " + command + " " + value)
+  z.fromParent("abc")
+  z.fromA(command, value)
+}
 
-    // String zoneName = getCommandZoneName(cmdPre)
-    // // Forward the command to the appropriate zone...
-    // if(zone != -1 && zoneName.length() > 0)
-    // {
-    //     def child = getChild(zoneName)
+def getZone(Integer zone){
+    writeLogDebug("getZone " + zone)
+    String childName = zoneNames[zone + 1]
+    // Get child device...
+    return getChild(childName)
+}
 
-    //     if(child != null)
-    //     {
-    //         def cmdMap = ["zone":zone, "data":data]
-    //         child.forwardResponse(cmdMap)
-    //     }
-    // }
+@Field static List PowerResponse = ["PWR", "APR", "BPR", "ZEP" ]
+def handlePower(String resp){
+    writeLogDebug("handlepower " + resp)
+    if (resp.length() >= 4){
+        def code = resp.substring(0, 3) 
+        def pwrIdx = PowerResponse.indexOf(code)
+
+        if (pwrIdx > -1){
+            def val = resp.substring(3,4)
+            def v = val == "0" ? "on" : "off"
+            sendChildZone(pwrIdx, "power." + v)
+        }
+    }
+}
+
+@Field static List MuteResponse = ["MUT", "Z2MUT", "Z3MUT"]
+def handleMute(String resp){
+    writeLogDebug("handleMute " + resp)
+    def muteIdx = resp.indexOf("MUT")
+    if (muteIdx > -1){
+        def muteOn = "on"
+        def zone = 1
+        if (muteIdx == 0){
+            if (resp.substring(3, 4) == "1"){
+                muteOn = "off"
+            }
+        }
+
+        if (muteIdx == 2){
+            if (resp.substring(0, 2) == "Z2"){
+                zone = 2
+            }else{
+                zone = 3
+            }
+        }
+        sendChildZone(zone, "mute." + muteOn)
+    }
+}
+
+@Field static List VolumeResponse = ["VOL", "ZV", "YV"]
+def handleVolume(String resp){
+    writeLogDebug("handleVolue " + resp)
+    if (resp.indexOf("VOL") == 0){
+        sendChildZone(1, "volume",  TranslateVolumeLevel(0.5f, resp.substring(3, 6).toInteger()))
+    }
+
+    def val = resp.substring(0,2)
+    if (val =="ZV" || val == "YV"){
+        sendChildZone(val == "ZV" ? 2 : 3, TranslateVolumeLevel(1, resp.substring(2, 4).toInteger()))
+    }
 }
 
 def initialize()
@@ -186,8 +273,8 @@ def updated()
     unschedule()
 
 	// disable debug logs after 30 min
-	if (debugOutput) 
-		runIn(1800,logsOff)
+	// if (debugOutput) 
+	// 	runIn(1800,logsOff)
 
     updateChildren()
     //device.updateSetting("enabledReceiverZones",[value:"false",type:"enum"])	
@@ -272,7 +359,7 @@ def updateChildren()
 
 private def getChild(String zoneName)
 {
-    //writeLogDebug("getChild with ${zoneName}")
+    writeLogDebug("getChild with ${zoneName}")
     def child = null
     
     try 
@@ -316,11 +403,6 @@ private void createChildDevice(Integer zone, String zoneName, String type)
     }
 }
 
-def fromChild(String msg)
-{
-    writeLogDebug("Received message from child: ${msg}")
-}
-
 def sendTelnetMsg(String msg) 
 {
     writeLogDebug("Child called sendTelnetMsg with ${msg}")
@@ -333,13 +415,6 @@ def finalizeTelnetMessage(command)
     sb.append(command)
     sb.append((char)Integer.parseInt("0D", 16))   //CR
     return sb.toString()
-}
-
-def Integer getEiscpVolumeMaxSetting()
-{
-    Integer maxIscpHexValue = settings?.eISCPVolumeRange?.toBigDecimal()
-	writeLogDebug("settings?.eISCPVolumeRange: ${maxIscpHexValue}")
-    return maxIscpHexValue
 }
 
 def getName()
