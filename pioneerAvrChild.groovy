@@ -110,8 +110,8 @@ def updated()
     unschedule()
 
 	// disable debug logs after 30 min
-	// if (debugOutput) 
-	// 	runIn(1800,logsOff)
+	if (debugOutput) 
+		runIn(1800,logsOff)
 
     initialize()
 }
