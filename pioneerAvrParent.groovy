@@ -1,9 +1,11 @@
  /*
-    Copyright © 2020 Steve Vibert (@SteveV)
 
-    Portions of this code are based on Mike Maxwell's PioneerIP device handler for SmartThings
-    taken from this post: https://community.smartthings.com/t/itach-integration/25470/23
-    
+    Most of this code was copied from: 
+    "Copyright © 2020 Steve Vibert (@SteveV)
+    https://github.com/stevevib/Hubitat"
+
+    I modified it to work for the telenet commands of multizone pioneer
+
     Licensed under the Apache License, Version 2.0 (the "License");
     you may not use this file except in compliance with the License.
     You may obtain a copy of the License at
@@ -16,28 +18,13 @@
     See the License for the specific language governing permissions and
     limitations under the License.
 
-    Pioneer eISCP Protocol Specifications Documents which include zone specific commands can 
-    be found at: https://github.com/stevevib/Hubitat/Devices/PioneerMultiZoneAVR/Docs/
-
-
     Version History:
     ================
 
     Date            Version             By                  Changes
     --------------------------------------------------------------------------------
-    2020-12-14      0.9.201214.1        Steve Vibert        Initial Beta Release
-    2021-03-20      0.9.210320.1        Steve Vibert        Fix: text logging settings being ignored
-
-
-    WARNING!
-        In addition to controlling basic receiver functionality, this driver also includes 
-        the ability to set volume levels and other settings using raw eISCP commands. Some 
-        commands such as volume level, allow you to enter a value from a given min/max value 
-        range. Randomly trying these commands without fully understanding these values may 
-        lead to unintended consequences that could damage your receiver and/or your speakers.
-
-        Please make sure you read *and understand* the eISCP protocal documents before trying 
-        a command to see what it does.   
+    2021-02-08      0.5.0               Derek Gilbert       Initial Version
+  
 */
 
 import groovy.transform.Field
@@ -68,7 +55,7 @@ metadata
 
 def getVersion()
 {
-    return "0.9.210320.1"
+    return "0.5.0"
 }
 
 void parse(String resp) 
