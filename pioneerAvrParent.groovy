@@ -31,7 +31,7 @@ import groovy.transform.Field
 
 metadata 
 {
-	definition (name: "Pioneer Multi-Zone AVR Parent", namespace: "SteveV", author: "Steve Vibert")
+	definition (name: "Pioneer Multi-Zone AVR Parent", namespace: "PioneerDGs", author: "Derek Gilbert")
 	{
 		capability "Initialize"
 		capability "Telnet"
