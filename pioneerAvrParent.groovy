@@ -24,6 +24,8 @@
     Date            Version             By                  Changes
     --------------------------------------------------------------------------------
     2021-02-08      0.5.0               Derek Gilbert       Initial Version
+    2026-05-31      0.6.0               Derek Gilbert       Zone routing, reconnect, telnet fixes
+    2026-05-31      0.6.1               Derek Gilbert       Staggered refresh, refresh on connect
   
 */
 
@@ -55,7 +57,7 @@ metadata
 
 def getVersion()
 {
-    return "0.5.0"
+    return "0.6.1"
 }
 
 void parse(String resp) 
@@ -144,26 +146,32 @@ String getCommand(Integer zone, String command){
 }
 
 def sendChildZone(Integer zone, String command){
-   def z = getZone(zone)
-   writeLogDebug("sendChild2 " + command)
-   z.fromA("test")
-   z.fromParent("test")
-   z.fromA(45)
-   z.fromA(command)
+    def z = getZone(zone)
+    if (!z) {
+        writeLogDebug("sendChildZone: no child for zone ${zone}")
+        return
+    }
+    writeLogDebug("sendChildZone zone ${zone}: ${command}")
+    z.fromA(command)
 }
 
 def sendChildZone(Integer zone, String command, String value ){
-  def z = getZone(zone)
-  writeLogDebug("sendChild " + command + " " + value)
-  z.fromParent("abc")
-  z.fromA(command, value)
+    def z = getZone(zone)
+    if (!z) {
+        writeLogDebug("sendChildZone: no child for zone ${zone}")
+        return
+    }
+    writeLogDebug("sendChildZone zone ${zone}: ${command} ${value}")
+    z.fromA(command, value)
 }
 
 def getZone(Integer zone){
-    writeLogDebug("getZone " + zone)
-    String childName = zoneNames[zone + 1]
-    // Get child device...
-    return getChild(childName)
+    writeLogDebug("getZone ${zone}")
+    if (zone == null || zone < 1 || zone >= zoneNames.size()) {
+        writeLogDebug("getZone: invalid zone ${zone}")
+        return null
+    }
+    return getChild(zoneNames[zone])
 }
 
 @Field static List PowerResponse = ["PWR", "APR", "BPR", "ZEP" ]
@@ -176,7 +184,7 @@ def handlePower(String resp){
         if (pwrIdx > -1){
             def val = resp.substring(3,4)
             def v = val == "0" ? "on" : "off"
-            sendChildZone(pwrIdx, "power." + v)
+            sendChildZone(pwrIdx + 1, "power." + v)
         }
     }
 }
@@ -207,14 +215,24 @@ def handleMute(String resp){
 
 @Field static List VolumeResponse = ["VOL", "ZV", "YV"]
 def handleVolume(String resp){
-    writeLogDebug("handleVolue " + resp)
-    if (resp.indexOf("VOL") == 0){
-        sendChildZone(1, "volume",  TranslateVolumeLevel(0.5f, resp.substring(3, 6).toInteger()))
+    writeLogDebug("handleVolume ${resp}")
+    if (resp.indexOf("VOL") == 0 && resp.length() >= 6){
+        try {
+            sendChildZone(1, "volume", TranslateVolumeLevel(0.5f, resp.substring(3, 6).toInteger()))
+        } catch (e) {
+            writeLogDebug("handleVolume main zone parse error: ${e.message}")
+        }
     }
 
-    def val = resp.substring(0,2)
-    if (val =="ZV" || val == "YV"){
-        sendChildZone(val == "ZV" ? 2 : 3, TranslateVolumeLevel(1, resp.substring(2, 4).toInteger()))
+    if (resp.length() >= 4) {
+        def val = resp.substring(0, 2)
+        if (val == "ZV" || val == "YV"){
+            try {
+                sendChildZone(val == "ZV" ? 2 : 3, "volume", TranslateVolumeLevel(1, resp.substring(2, 4).toInteger()))
+            } catch (e) {
+                writeLogDebug("handleVolume zone 2/3 parse error: ${e.message}")
+            }
+        }
     }
 }
 
@@ -223,10 +241,28 @@ def initialize()
 	String ip = settings?.PioneerIP as String
 	Integer port = settings?.eISCPPort as Integer
 
+	if (!ip || !port) {
+        log.warn "${device.getName()} Pioneer IP and port must be configured"
+        return
+    }
+
 	writeLogDebug("ip: ${ip} port: ${port}")
 
-	telnetConnect(ip, port, null, null)
-	writeLogDebug("Opening telnet connection with ${ip}:${port}")
+    try {
+        telnetClose()
+        def termChars = getTelnetTermChars()
+        if (termChars) {
+            telnetConnect([termChars: termChars], ip, port, null, null)
+        } else {
+            telnetConnect(ip, port, null, null)
+        }
+        writeLogDebug("Opening telnet connection with ${ip}:${port}")
+    } catch (e) {
+        logConnectionFailure(e.message)
+        state.connectionState = "disconnected"
+        scheduleReconnect()
+        return
+    }
 
     try 
     {
@@ -244,6 +280,44 @@ def initialize()
 void telnetStatus(String message) 
 {
 	writeLogDebug("${device.getName()} telnetStatus ${message}")
+
+    if (message.startsWith("status: open")) {
+        state.connectionState = "connected"
+        state.reconnectPending = false
+        state.reconnectDelay = 2
+        runIn(2, "refresh")
+    } else if (message.startsWith("failure:") || message.contains("closed")) {
+        state.connectionState = "disconnected"
+        logConnectionFailure(message)
+        scheduleReconnect()
+    }
+}
+
+private void logConnectionFailure(String detail) {
+    def ip = settings?.PioneerIP
+    def port = settings?.eISCPPort
+    if (detail?.contains("Connection refused")) {
+        log.warn "${device.getName()} connection refused at ${ip}:${port} — receiver may be off, network standby disabled, or wrong port (try 60128, 23, or 8102)"
+    } else if (detail?.contains("No route to host") || detail?.contains("Host unreachable")) {
+        log.warn "${device.getName()} cannot reach ${ip} — verify IP in Google Home device list or Pioneer network menu; Hubitat and receiver must be on the same LAN"
+    } else {
+        log.warn "${device.getName()} telnet connection failed to ${ip}:${port} — ${detail}"
+    }
+}
+
+private void scheduleReconnect() {
+    if (state.reconnectPending) return
+    state.reconnectPending = true
+    def delay = state.reconnectDelay ?: 2
+    state.reconnectDelay = Math.min(delay * 2, 300)
+    writeLogInfo("Scheduling telnet reconnect in ${delay}s")
+    runIn(delay, "reconnectTelnet")
+}
+
+def reconnectTelnet() {
+    state.reconnectPending = false
+    telnetClose()
+    runIn(1, "initialize")
 }
 
 def installed()
@@ -266,11 +340,42 @@ def updated()
     updateChildren()
 
     initialize()
+    runIn(1800, "healthCheck")
 }
 
 void refresh()
 {
-    writeLogDebug("refresh")
+    writeLogInfo("refresh all enabled zones")
+    unschedule("refreshNextZone")
+    state.refreshZoneQueue = []
+    enabledReceiverZones?.each { state.refreshZoneQueue << (it as Integer) }
+    state.refreshZoneIndex = 0
+    refreshNextZone()
+}
+
+def refreshNextZone() {
+    def queue = state.refreshZoneQueue ?: []
+    def index = state.refreshZoneIndex as Integer ?: 0
+    if (index >= queue.size()) {
+        state.refreshZoneIndex = 0
+        return
+    }
+    def child = getZone(queue[index])
+    if (child) child.refresh()
+    state.refreshZoneIndex = index + 1
+    if (state.refreshZoneIndex < queue.size()) {
+        runIn(2, "refreshNextZone")
+    }
+}
+
+def healthCheck() {
+    writeLogDebug("healthCheck")
+    if (state.connectionState == "disconnected") {
+        reconnectTelnet()
+    } else {
+        refresh()
+    }
+    runIn(1800, "healthCheck")
 }
 
 def logsOff() 
@@ -311,7 +416,7 @@ def updateChildren()
             // ...or create it if it doesn't exist
             if(child == null) 
             {
-                if (logEnable) 
+                if (debugOutput) 
                     writeLogDebug("Child with id ${childName} does not exist.  Creating...")
                 
                 def childType = "Pioneer Multi-Zone AVR Child Zone"
@@ -395,11 +500,39 @@ def sendTelnetMsg(String msg)
     sendHubCommand(new hubitat.device.HubAction(finalizeTelnetMessage(msg), hubitat.device.Protocol.TELNET))
 }
  
+private List getTelnetTermChars() {
+    switch (settings?.eISCPTermination as String) {
+        case "2": return [10]
+        case "3": return [13, 10]
+        case "4": return null
+        default: return [13]
+    }
+}
+
 def finalizeTelnetMessage(command)
 {
+    if (getTelnetTermChars()) {
+        return command
+    }
+
+    if ((settings?.eISCPTermination as String) == "4") {
+        return command
+    }
+
     def sb = StringBuilder.newInstance()
     sb.append(command)
-    sb.append((char)Integer.parseInt("0D", 16))   //CR
+    switch (settings?.eISCPTermination as String) {
+        case "2":
+            sb.append((char) 10)
+            break
+        case "3":
+            sb.append((char) 13)
+            sb.append((char) 10)
+            break
+        default:
+            sb.append((char) 13)
+            break
+    }
     return sb.toString()
 }
 

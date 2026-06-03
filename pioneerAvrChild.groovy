@@ -24,6 +24,8 @@
     Date            Version             By                  Changes
     --------------------------------------------------------------------------------
     2021-02-08      0.5.0               Derek Gilbert       Initial Version
+    2026-05-31      0.6.0               Derek Gilbert       muteToggle, log fixes
+    2026-05-31      0.6.1               Derek Gilbert       Staggered refresh queries
   
 */
 
@@ -59,7 +61,7 @@ metadata
 
 def getVersion()
 {
-    return "0.5.0"
+    return "0.6.1"
 }
 
 void parse(String description) 
@@ -105,13 +107,31 @@ def updated()
 
 void refresh()
 {
-    writeLogInfo ("${getFullDeviceName()} refresh")
+    writeLogInfo("${getFullDeviceName()} refresh")
+    unschedule("refreshNextAttribute")
+    state.refreshStep = 0
+    refreshNextAttribute()
+}
 
-    // Get the current state for the zone...
-    sendCommand( getCommand("power.query") )
-	sendCommand( getCommand("volume.query") )
-	sendCommand( getCommand("mute.query") )
-	//sendCommand( getCommand(InputQuery) )
+def refreshNextAttribute() {
+    def zone = getCurrentZone()
+    def commands = ["power.query", "volume.query", "mute.query"]
+    def step = state.refreshStep as Integer ?: 0
+
+    while (step < commands.size()) {
+        def cmd = commands[step]
+        step++
+        if (zone == 4 && (cmd.startsWith("volume") || cmd.startsWith("mute"))) {
+            continue
+        }
+        sendCommand(getCommand(cmd))
+        state.refreshStep = step
+        if (step < commands.size()) {
+            runIn(1, "refreshNextAttribute")
+        }
+        return
+    }
+    state.refreshStep = 0
 }
 
 def logsOff() 
@@ -158,6 +178,15 @@ def unmute()
     sendCommand(getCommand("mute.off"))
 }
 
+def muteToggle()
+{
+    if (device.currentValue("mute") == "muted") {
+        unmute()
+    } else {
+        mute()
+    }
+}
+
 def refreshVolume()
 {
     String volQry = getCommand("volume.query")
@@ -193,19 +222,8 @@ def sendCommand(String command)
 }
 
 
-def fromParent(String msg)
-{
-    writeLogInfo("from parent." + msg)
-}
-
-def fromA(Integer blah) {
-    writeLogDebug("blah...")
-    writeLogDebug(blah)
-}
-
 def fromA(String command) {
-    writeLogDebug("handle response")
-    writeLogDebug("handleReceiverResponse " + command)
+    writeLogDebug("handleReceiverResponse ${command}")
     if(command == "power.on"){
         writeLogInfo("${getFullDeviceName()} power is on")
         sendEvent(name: "switch", value: "on")
@@ -216,14 +234,13 @@ def fromA(String command) {
         writeLogInfo("${getFullDeviceName()} is muted")
         sendEvent(name: "mute", value: "muted")
     }else if (command == "mute.off"){
-        writeLogInfo("${getFullDeviceName()} power is unmuted")
+        writeLogInfo("${getFullDeviceName()} is unmuted")
         sendEvent(name: "mute", value: "unmuted")
     }
 }
 
 def fromA(String command, String value) {
-    writeLogDebug("handle response")
-    writeLogDebug("handleReceiverResponse " + command + " " + value)
+    writeLogDebug("handleReceiverResponse ${command} ${value}")
 
     if(command == "volume"){
         writeLogInfo("${getFullDeviceName()} volume is ${value}")
