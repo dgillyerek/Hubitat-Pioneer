@@ -26,6 +26,9 @@
     2021-02-08      0.5.0               Derek Gilbert       Initial Version
     2026-05-31      0.6.0               Derek Gilbert       Zone routing, reconnect, telnet fixes
     2026-05-31      0.6.1               Derek Gilbert       Staggered refresh, refresh on connect
+    2026-06-21      0.7.0               Derek Gilbert       Input switching, zone power commands
+    2026-06-21      0.7.1               Derek Gilbert       HD Zone (zone 4) input support
+    2026-06-21      0.7.2               Derek Gilbert       Zone select before input, ZEC/ZEB
   
 */
 
@@ -39,6 +42,9 @@ metadata
 		capability "Telnet"
 
         command "refresh"
+        command "turnOnZone", [[name:"Zone Number*", type: "NUMBER", description: "1=Main, 2=Zone 2, 3=Zone 3, 4=Zone 4"]]
+        command "turnOffZone", [[name:"Zone Number*", type: "NUMBER", description: "1=Main, 2=Zone 2, 3=Zone 3, 4=Zone 4"]]
+        command "setZoneInput", [[name:"Zone Number*", type: "NUMBER"], [name:"Source Code or Name*", type: "STRING"]]
 	}
 
     preferences 
@@ -48,16 +54,78 @@ metadata
 		input name: "eISCPTermination", type: "enum", options: [[1:"CR"],[2:"LF"],[3:"CRLF"],[4:"EOF"]] ,title: "EISCP Termination Option", required: true, displayDuringSetup: true, description: "Most receivers should work with CR termination"
 		input name: "eISCPVolumeRange", type: "enum", options: [[50:"0-50 (0x00-0x32)"],[80:"0-80 (0x00-0x50)"],[100:"0-100 (0x00-0x64)"],[200:"0-100 Half Step (0x00-0xC8)"]],defaultValue:80, title: "Supported Volume Range", required: true, displayDuringSetup: true, description:"(see Pioneer EISCP Protocol doc for model specific values)"
         input name: "enabledReceiverZones", type: "enum", title: "Enabled Zones", required: true, multiple: true, options: [[1: "Main"],[2:"Zone 2"],[3:"Zone 3"],[4: "Zone 4"]]
+        input name: "inputSourceMap", type: "text", title: "Input source map (code:name, comma-separated)", required: false, defaultValue: "00:Phono,01:CD,02:Tuner,03:CD-R/Tape,04:DVD,05:TV/SAT,10:Video 1,14:Video 2,15:DVR/BDR,17:iPod/USB,19:HDMI 1,20:HDMI 2,21:HDMI 3,22:HDMI 4,25:BD,26:HMG,33:Adapter,38:Net Radio", description: "Used for input names on dashboards and automations"
+        input name: "zoneSelectCommands", type: "text", title: "Zone select commands before input", required: false, defaultValue: "4:ZEO", description: "Telnet command sent before input changes on a zone. Format: zoneNum:command pairs, comma-separated. Example: 4:ZEO selects/focuses HD Zone before input. Adjust for your model if input changes the wrong zone."
+        input name: "zoneSelectDelay", type: "number", title: "Delay after zone select (seconds)", required: false, defaultValue: 1, description: "Wait time between zone-select and input command"
  		input name: "textLogging",  type: "bool", title: "Enable description text logging ", required: true, defaultValue: true
         input name: "debugOutput", type: "bool", title: "Enable debug logging", defaultValue: true
     }
 }
 
 @Field static List zoneNames = ["N/A", "Main", "Zone 2", "Zone 3", "Zone 4" ]
+@Field static List InputCommand = ["FN", "ZS", "ZT", "ZEA"]
+@Field static List InputUpCommand = ["FU", "ZSFU", "ZTFU", "ZEC"]
+@Field static List InputDownCommand = ["FD", "ZSFD", "ZTFD", "ZEB"]
 
 def getVersion()
 {
-    return "0.6.1"
+    return "0.7.2"
+}
+
+String getZoneSelectCommand(Integer zone) {
+    def pref = settings?.zoneSelectCommands ?: ""
+    if (!pref?.trim()) {
+        return null
+    }
+    def match = null
+    pref.split(",").each { entry ->
+        def parts = entry.trim().split(":", 2)
+        if (parts.size() >= 2 && (parts[0].trim() as Integer) == zone) {
+            match = parts[1].trim()
+        }
+    }
+    return match ?: null
+}
+
+Integer getZoneSelectDelaySec() {
+    def delay = settings?.zoneSelectDelay as Integer ?: 1
+    return Math.max(delay, 1)
+}
+
+Map getInputSourceMap() {
+    def map = [:]
+    def src = settings?.inputSourceMap ?: ""
+    if (!src?.trim()) {
+        return map
+    }
+    src.split(",").each { entry ->
+        def parts = entry.trim().split(":", 2)
+        if (parts.size() >= 2) {
+            map[parts[0].trim().padLeft(2, "0")] = parts[1].trim()
+        }
+    }
+    return map
+}
+
+String getInputName(String code) {
+    if (!code) {
+        return "Unknown"
+    }
+    def normalized = code.padLeft(2, "0")
+    return getInputSourceMap()[normalized] ?: "Input ${normalized}"
+}
+
+String resolveInputCode(String source) {
+    if (!source) {
+        return null
+    }
+    def trimmed = source.trim()
+    if (trimmed ==~ /[0-9A-Fa-f]{1,2}/) {
+        return trimmed.padLeft(2, "0").toUpperCase()
+    }
+    def map = getInputSourceMap()
+    def match = map.find { k, v -> v.equalsIgnoreCase(trimmed) }
+    return match ? match.key : null
 }
 
 void parse(String resp) 
@@ -71,13 +139,12 @@ void parse(String resp)
     handlePower(resp)
     handleMute(resp)
     handleVolume(resp)
+    handleInput(resp)
 }
 
 @Field static List PowerCommand = ["P", "AP", "BP", "ZE" ]
 @Field static List VolumeCommand = ["V", "Z", "Y" ]
 @Field static List Mute = ["M", "Z2M", "Z3M"]
-//@field static List InputSet ["FN", "ZS", "ZT"]
-
 //ZONE1
 //VOL***
 //  (1step = 0.5dB)
@@ -110,8 +177,9 @@ String getCommand(Integer zone, String command){
     String[] a = command.split("\\.")
     def zoneIndex = zone - 1
 
-    if (zone ==4 && (a[0]=="mute" || a[0] == "volume")){
-        writeLogDebug("Zone4 can't mute nor volumn")
+    if (zone == 4 && (a[0] == "mute" || a[0] == "volume")) {
+        writeLogDebug("Zone 4 does not support ${a[0]}")
+        return null
     }
 
     def sb = StringBuilder.newInstance()
@@ -130,6 +198,23 @@ String getCommand(Integer zone, String command){
         if (a[1] == "query" && (zone == 2 || zone ==3 )){
             sb.append("V")
         }
+    }else if (a[0] == "input") {
+        if (a[1] == "query") {
+            if (zone == 1) {
+                return "?F"
+            }
+            return "?${InputCommand[zoneIndex]}"
+        }
+        if (a[1] == "set" && a.size() > 2) {
+            return "${a[2].padLeft(2, "0")}${InputCommand[zoneIndex]}"
+        }
+        if (a[1] == "up") {
+            return InputUpCommand[zoneIndex]
+        }
+        if (a[1] == "down") {
+            return InputDownCommand[zoneIndex]
+        }
+        return null
     }
 
     if (a[1]== "on"){
@@ -214,6 +299,39 @@ def handleMute(String resp){
 }
 
 @Field static List VolumeResponse = ["VOL", "ZV", "YV"]
+def handleInput(String resp) {
+    writeLogDebug("handleInput ${resp}")
+
+    if (resp.length() >= 4 && (resp.startsWith("FN") || resp.startsWith("SLI"))) {
+        sendChildZone(1, "input", resp.substring(2, 4))
+        return
+    }
+
+    if (resp.length() >= 5 && resp.startsWith("Z2F")) {
+        sendChildZone(2, "input", resp.substring(3, 5))
+        return
+    }
+
+    if (resp.length() >= 5 && resp.startsWith("Z3F")) {
+        sendChildZone(3, "input", resp.substring(3, 5))
+        return
+    }
+
+    if (resp.length() >= 5 && resp.startsWith("ZEA")) {
+        sendChildZone(4, "input", resp.substring(3, 5))
+        return
+    }
+
+    if (resp.length() >= 4 && resp.startsWith("ZS")) {
+        sendChildZone(2, "input", resp.substring(2, 4))
+        return
+    }
+
+    if (resp.length() >= 4 && resp.startsWith("ZT")) {
+        sendChildZone(3, "input", resp.substring(2, 4))
+    }
+}
+
 def handleVolume(String resp){
     writeLogDebug("handleVolume ${resp}")
     if (resp.indexOf("VOL") == 0 && resp.length() >= 6){
@@ -341,6 +459,36 @@ def updated()
 
     initialize()
     runIn(1800, "healthCheck")
+}
+
+def turnOnZone(zoneNumber) {
+    def zone = zoneNumber as Integer
+    def child = getZone(zone)
+    if (!child) {
+        log.warn "${device.getName()} turnOnZone: no child for zone ${zone}"
+        return
+    }
+    child.on()
+}
+
+def turnOffZone(zoneNumber) {
+    def zone = zoneNumber as Integer
+    def child = getZone(zone)
+    if (!child) {
+        log.warn "${device.getName()} turnOffZone: no child for zone ${zone}"
+        return
+    }
+    child.off()
+}
+
+def setZoneInput(zoneNumber, source) {
+    def zone = zoneNumber as Integer
+    def child = getZone(zone)
+    if (!child) {
+        log.warn "${device.getName()} setZoneInput: no child for zone ${zone}"
+        return
+    }
+    child.setInputSource(source as String)
 }
 
 void refresh()
@@ -496,8 +644,31 @@ private void createChildDevice(Integer zone, String zoneName, String type)
 
 def sendTelnetMsg(String msg) 
 {
-    writeLogDebug("Child called sendTelnetMsg with ${msg}")
+    writeLogDebug("sendTelnetMsg ${msg}")
     sendHubCommand(new hubitat.device.HubAction(finalizeTelnetMessage(msg), hubitat.device.Protocol.TELNET))
+}
+
+def sendZoneCommand(Integer zone, String msg, Boolean withZoneSelect = false) {
+    if (!msg) {
+        return
+    }
+    def selectCmd = withZoneSelect ? getZoneSelectCommand(zone) : null
+    if (selectCmd) {
+        writeLogInfo("${device.getName()} zone ${zone} select: ${selectCmd}, then: ${msg}")
+        state.pendingZoneCommand = msg
+        sendTelnetMsg(selectCmd)
+        runIn(getZoneSelectDelaySec(), "sendPendingZoneCommand")
+    } else {
+        sendTelnetMsg(msg)
+    }
+}
+
+def sendPendingZoneCommand() {
+    def msg = state.pendingZoneCommand
+    state.pendingZoneCommand = null
+    if (msg) {
+        sendTelnetMsg(msg)
+    }
 }
  
 private List getTelnetTermChars() {
