@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pioneer RGB Input Name Viewer</title>
+  <style>
+    :root {
+      --bg: #0f1218;
+      --panel: #1a2030;
+      --text: #e8ecf2;
+      --muted: #93a0b5;
+      --accent: #4f8cff;
+      --ok: #2ecc71;
+      --warn: #f1c40f;
+      --bad: #e74c3c;
+      --line: #2a3348;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+    }
+    .wrap { max-width: 960px; margin: 0 auto; padding: 20px; }
+    h1 { font-size: 1.35rem; margin: 0 0 6px; }
+    .sub { color: var(--muted); margin: 0 0 20px; font-size: 0.92rem; }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    label { display: block; font-size: 0.82rem; color: var(--muted); margin: 10px 0 4px; }
+    input {
+      width: 100%;
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: #0d1017;
+      color: var(--text);
+    }
+    .row { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 10px; }
+    @media (max-width: 700px) { .row { grid-template-columns: 1fr 1fr; } }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+    button {
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-weight: 600;
+      cursor: pointer;
+      background: #2a3348;
+      color: var(--text);
+    }
+    button.primary { background: var(--accent); color: #fff; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .status { color: var(--muted); font-size: 0.88rem; margin-top: 10px; min-height: 1.2em; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 8px 6px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { color: var(--muted); font-weight: 600; }
+    .match { color: var(--ok); font-weight: 600; }
+    .nomatch { color: var(--warn); }
+    .err { color: var(--bad); }
+    pre.raw {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-all;
+      font-size: 0.78rem;
+      color: var(--muted);
+      max-height: 4.5em;
+      overflow: auto;
+    }
+    .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 0.72rem;
+      background: #243049;
+    }
+    .pill.ok { background: rgba(46, 204, 113, 0.15); color: var(--ok); }
+    .pill.bad { background: rgba(231, 76, 60, 0.15); color: var(--bad); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Pioneer RGB input name viewer</h1>
+    <p class="sub">
+      Queries your receiver with <code>?RGBxx</code> and shows the raw telnet response plus parsed names.
+      You must run the local server first, then open the URL it prints — do not open the HTML file directly.
+    </p>
+    <div class="card" id="serverWarning" style="display:none;border-color:#e74c3c;background:#2a1515;">
+      <strong style="color:#ff8a80;">Server not reachable</strong>
+      <p id="serverWarningText" style="margin:8px 0 0;color:#ffb4ab;font-size:0.92rem;"></p>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <div>
+          <label>Receiver IP</label>
+          <input id="ip" placeholder="192.168.86.74" />
+        </div>
+        <div>
+          <label>Port</label>
+          <input id="port" type="number" value="23" />
+        </div>
+        <div>
+          <label>Scan from</label>
+          <input id="from" type="number" value="0" min="0" max="99" />
+        </div>
+        <div>
+          <label>Scan to</label>
+          <input id="to" type="number" value="59" min="0" max="99" />
+        </div>
+      </div>
+      <div class="actions">
+        <button class="primary" id="scanBtn">Scan range</button>
+        <button id="rgcBtn">Query ?RGC</button>
+        <button id="currentBtn">Query ?F (current input)</button>
+        <button id="clearBtn">Clear results</button>
+      </div>
+      <p class="status" id="status">Ready.</p>
+    </div>
+
+    <div class="card">
+      <h2 style="margin:0 0 10px;font-size:1rem;">Results</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Query</th>
+            <th>Matched name</th>
+            <th>All RGB lines</th>
+            <th>Raw response</th>
+          </tr>
+        </thead>
+        <tbody id="results"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const els = {
+      ip: document.getElementById("ip"),
+      port: document.getElementById("port"),
+      from: document.getElementById("from"),
+      to: document.getElementById("to"),
+      status: document.getElementById("status"),
+      results: document.getElementById("results"),
+      scanBtn: document.getElementById("scanBtn"),
+      rgcBtn: document.getElementById("rgcBtn"),
+      currentBtn: document.getElementById("currentBtn"),
+      clearBtn: document.getElementById("clearBtn"),
+    };
+
+    const storageKey = "pioneer.rgb.viewer";
+    const saved = JSON.parse(localStorage.getItem(storageKey) || "{}");
+    if (saved.ip) els.ip.value = saved.ip;
+    if (saved.port) els.port.value = saved.port;
+
+    function saveConfig() {
+      localStorage.setItem(storageKey, JSON.stringify({
+        ip: els.ip.value.trim(),
+        port: els.port.value,
+      }));
+    }
+
+    function cfg() {
+      return {
+        ip: els.ip.value.trim(),
+        port: parseInt(els.port.value, 10) || 23,
+      };
+    }
+
+    function setStatus(text, isError = false) {
+      els.status.textContent = text;
+      els.status.className = "status" + (isError ? " err" : "");
+    }
+
+    function showServerWarning(message) {
+      const box = document.getElementById("serverWarning");
+      document.getElementById("serverWarningText").textContent = message;
+      box.style.display = "block";
+    }
+
+    function hideServerWarning() {
+      document.getElementById("serverWarning").style.display = "none";
+    }
+
+    async function api(path, body) {
+      let res;
+      try {
+        res = await fetch(path, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      } catch (err) {
+        throw new Error(
+          "Cannot reach the local server. Start it with: cd tools && python pioneer_rgb_server.py " +
+          "then open http://127.0.0.1:8765/ in this browser (do not open the .html file directly). " +
+          `(${err.message || err})`
+        );
+      }
+      let data = {};
+      try {
+        data = await res.json();
+      } catch (err) {
+        throw new Error(`Server returned invalid JSON (HTTP ${res.status})`);
+      }
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      return data;
+    }
+
+    function addRow(result) {
+      const tr = document.createElement("tr");
+      const matched = result.matched_name
+        ? `<span class="match">${escapeHtml(result.matched_name)}</span>`
+        : `<span class="err">(no matching RGB line)</span>`;
+
+      const rgbHtml = (result.rgb_lines || []).map((r) => {
+        const cls = r.matches_query ? "match" : "nomatch";
+        const pill = r.matches_query
+          ? `<span class="pill ok">matches query</span>`
+          : `<span class="pill bad">extra line</span>`;
+        return `<div class="${cls}">${escapeHtml(r.line)} → code <b>${escapeHtml(r.parsed_code || "?")}</b>, name <b>${escapeHtml(r.parsed_name || "?")}</b> ${pill}</div>`;
+      }).join("") || "<span class='muted'>(none)</span>";
+
+      tr.innerHTML = `
+        <td><code>${escapeHtml(result.query)}</code></td>
+        <td>${matched}</td>
+        <td>${rgbHtml}</td>
+        <td><pre class="raw">${escapeHtml(result.raw || "")}</pre></td>
+      `;
+      els.results.appendChild(tr);
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    async function queryRgb(index) {
+      saveConfig();
+      const { ip, port } = cfg();
+      return api("/api/rgb", { ip, port, index });
+    }
+
+    async function queryCmd(cmd) {
+      saveConfig();
+      const { ip, port } = cfg();
+      return api("/api/cmd", { ip, port, cmd });
+    }
+
+    els.scanBtn.onclick = async () => {
+      const start = parseInt(els.from.value, 10) || 0;
+      const end = parseInt(els.to.value, 10) || 59;
+      const lo = Math.min(start, end);
+      const hi = Math.max(start, end);
+      els.scanBtn.disabled = true;
+      for (let i = lo; i <= hi; i++) {
+        setStatus(`Querying ?RGB${String(i).padStart(2, "0")} (${i - lo + 1}/${hi - lo + 1})…`);
+        try {
+          addRow(await queryRgb(i));
+        } catch (e) {
+          addRow({ query: `?RGB${String(i).padStart(2, "0")}`, matched_name: null, rgb_lines: [], raw: e.message });
+        }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      setStatus(`Scan complete (${hi - lo + 1} queries).`);
+      els.scanBtn.disabled = false;
+    };
+
+    els.rgcBtn.onclick = async () => {
+      els.rgcBtn.disabled = true;
+      setStatus("Querying ?RGC…");
+      try {
+        const data = await queryCmd("?RGC");
+        addRow({
+          query: "?RGC",
+          matched_name: data.lines?.[0] || null,
+          rgb_lines: (data.lines || []).map((line) => ({
+            line,
+            parsed_code: null,
+            parsed_name: line,
+            matches_query: true,
+          })),
+          raw: data.raw,
+        });
+        setStatus("?RGC complete.");
+      } catch (e) {
+        setStatus(e.message, true);
+      }
+      els.rgcBtn.disabled = false;
+    };
+
+    els.currentBtn.onclick = async () => {
+      els.currentBtn.disabled = true;
+      setStatus("Querying ?F…");
+      try {
+        const data = await queryCmd("?F");
+        addRow({
+          query: "?F",
+          matched_name: data.lines?.find((l) => l.startsWith("FN")) || null,
+          rgb_lines: (data.lines || []).map((line) => ({
+            line,
+            parsed_code: line.startsWith("FN") && line.length >= 4 ? line.slice(2, 4) : null,
+            parsed_name: line,
+            matches_query: line.startsWith("FN"),
+          })),
+          raw: data.raw,
+        });
+        setStatus("?F complete.");
+      } catch (e) {
+        setStatus(e.message, true);
+      }
+      els.currentBtn.disabled = false;
+    };
+
+    els.clearBtn.onclick = () => {
+      els.results.innerHTML = "";
+      setStatus("Cleared.");
+    };
+
+    fetch("/api/config")
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((c) => {
+        hideServerWarning();
+        if (!els.ip.value && c.default_ip) els.ip.value = c.default_ip;
+        if (c.default_port) els.port.value = c.default_port;
+        setStatus("Connected to local server. Ready.");
+      })
+      .catch(() => {
+        if (location.protocol === "file:") {
+          showServerWarning(
+            "This page was opened as a file (file://). Browsers block API calls from local files. " +
+            "Open PowerShell, run: cd c:\\Development\\Hubitat-Pioneer\\tools && python pioneer_rgb_server.py " +
+            "Then visit http://127.0.0.1:8765/ in your browser."
+          );
+        } else {
+          showServerWarning(
+            "The pioneer_rgb_server.py process is not running on this address. " +
+            "In PowerShell: cd c:\\Development\\Hubitat-Pioneer\\tools && python pioneer_rgb_server.py " +
+            "Then reload http://127.0.0.1:8765/"
+          );
+        }
+        setStatus("Local server not connected.", true);
+      });
+  </script>
+</body>
+</html>

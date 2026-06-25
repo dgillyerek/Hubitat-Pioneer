@@ -29,6 +29,11 @@
     2026-06-21      0.7.0               Derek Gilbert       Input switching, zone power commands
     2026-06-21      0.7.1               Derek Gilbert       HD Zone (zone 4) input support
     2026-06-21      0.7.2               Derek Gilbert       Zone select before input, ZEC/ZEB
+    2026-06-21      0.7.4               Derek Gilbert       Telnet line parsing, status query fixes
+    2026-06-21      0.7.5               Derek Gilbert       Query ?RGBxx input names from AVR
+    2026-06-21      0.7.6               Derek Gilbert       Input next queue/hold, no ZEO on cycle
+    2026-06-21      0.7.7               Derek Gilbert       Input name display sync after RGB load
+    2026-06-21      0.7.8               Derek Gilbert       Match RGB response code to query index
   
 */
 
@@ -42,6 +47,7 @@ metadata
 		capability "Telnet"
 
         command "refresh"
+        command "refreshInputNames"
         command "turnOnZone", [[name:"Zone Number*", type: "NUMBER", description: "1=Main, 2=Zone 2, 3=Zone 3, 4=Zone 4"]]
         command "turnOffZone", [[name:"Zone Number*", type: "NUMBER", description: "1=Main, 2=Zone 2, 3=Zone 3, 4=Zone 4"]]
         command "setZoneInput", [[name:"Zone Number*", type: "NUMBER"], [name:"Source Code or Name*", type: "STRING"]]
@@ -54,9 +60,12 @@ metadata
 		input name: "eISCPTermination", type: "enum", options: [[1:"CR"],[2:"LF"],[3:"CRLF"],[4:"EOF"]] ,title: "EISCP Termination Option", required: true, displayDuringSetup: true, description: "Most receivers should work with CR termination"
 		input name: "eISCPVolumeRange", type: "enum", options: [[50:"0-50 (0x00-0x32)"],[80:"0-80 (0x00-0x50)"],[100:"0-100 (0x00-0x64)"],[200:"0-100 Half Step (0x00-0xC8)"]],defaultValue:80, title: "Supported Volume Range", required: true, displayDuringSetup: true, description:"(see Pioneer EISCP Protocol doc for model specific values)"
         input name: "enabledReceiverZones", type: "enum", title: "Enabled Zones", required: true, multiple: true, options: [[1: "Main"],[2:"Zone 2"],[3:"Zone 3"],[4: "Zone 4"]]
-        input name: "inputSourceMap", type: "text", title: "Input source map (code:name, comma-separated)", required: false, defaultValue: "00:Phono,01:CD,02:Tuner,03:CD-R/Tape,04:DVD,05:TV/SAT,10:Video 1,14:Video 2,15:DVR/BDR,17:iPod/USB,19:HDMI 1,20:HDMI 2,21:HDMI 3,22:HDMI 4,25:BD,26:HMG,33:Adapter,38:Net Radio", description: "Used for input names on dashboards and automations"
+        input name: "inputSourceMap", type: "text", title: "Input source map (code:name, comma-separated)", required: false, defaultValue: "00:Phono,01:CD,02:Tuner,03:CD-R/Tape,04:DVD,05:TV/SAT,10:Video 1,14:Video 2,15:DVR/BDR,17:iPod/USB,19:HDMI 1,20:HDMI 2,21:HDMI 3,22:HDMI 4,25:BD,26:HMG,33:Adapter,38:Net Radio", description: "Fallback names when device query is disabled or missing a code. Device names override these when 'Load input names from AVR' is on."
+        input name: "loadInputNamesFromDevice", type: "bool", title: "Load input names from AVR", required: true, defaultValue: true, description: "Queries ?RGB00-?RGB59 on connect for names configured on the receiver (HDMI labels, etc.)"
+        input name: "maxInputNameId", type: "number", title: "Max input ID to query", required: false, defaultValue: 60, description: "Upper bound for ?RGBxx queries (codes 00-59)"
         input name: "zoneSelectCommands", type: "text", title: "Zone select commands before input", required: false, defaultValue: "4:ZEO", description: "Telnet command sent before input changes on a zone. Format: zoneNum:command pairs, comma-separated. Example: 4:ZEO selects/focuses HD Zone before input. Adjust for your model if input changes the wrong zone."
         input name: "zoneSelectDelay", type: "number", title: "Delay after zone select (seconds)", required: false, defaultValue: 1, description: "Wait time between zone-select and input command"
+        input name: "inputCycleCodes", type: "text", title: "Input cycle list (optional)", required: false, description: "Comma-separated input codes to cycle for Input Next/Previous (e.g. 06,22,19,25). Leave blank to use native FU/ZEC. Recommended if native cycle skips audio or jumps to unused inputs."
  		input name: "textLogging",  type: "bool", title: "Enable description text logging ", required: true, defaultValue: true
         input name: "debugOutput", type: "bool", title: "Enable debug logging", defaultValue: true
     }
@@ -69,7 +78,15 @@ metadata
 
 def getVersion()
 {
-    return "0.7.2"
+    return "0.7.8"
+}
+
+List getInputCycleCodes() {
+    def pref = settings?.inputCycleCodes?.trim()
+    if (!pref) {
+        return null
+    }
+    return pref.split(",").collect { it.trim().padLeft(2, "0") }.findAll { it }
 }
 
 String getZoneSelectCommand(Integer zone) {
@@ -94,6 +111,15 @@ Integer getZoneSelectDelaySec() {
 
 Map getInputSourceMap() {
     def map = [:]
+    map.putAll(getManualInputSourceMap())
+    if (settings?.loadInputNamesFromDevice != false && state.deviceInputMap) {
+        map.putAll(state.deviceInputMap)
+    }
+    return map
+}
+
+private Map getManualInputSourceMap() {
+    def map = [:]
     def src = settings?.inputSourceMap ?: ""
     if (!src?.trim()) {
         return map
@@ -111,8 +137,15 @@ String getInputName(String code) {
     if (!code) {
         return "Unknown"
     }
-    def normalized = code.padLeft(2, "0")
-    return getInputSourceMap()[normalized] ?: "Input ${normalized}"
+    def normalized = code.toString().trim().padLeft(2, "0")
+    if (settings?.loadInputNamesFromDevice != false && state.deviceInputMap?.get(normalized)) {
+        return state.deviceInputMap[normalized]
+    }
+    def manual = getManualInputSourceMap()
+    if (manual[normalized]) {
+        return manual[normalized]
+    }
+    return "Input ${normalized}"
 }
 
 String resolveInputCode(String source) {
@@ -130,19 +163,37 @@ String resolveInputCode(String source) {
 
 void parse(String resp) 
 {
-    writeLogDebug("parse ${resp}")
-
-    if (resp.length() < 2){
+    if (!resp) {
         return
     }
+    writeLogDebug("parse raw: ${resp}")
 
-    handlePower(resp)
-    handleMute(resp)
-    handleVolume(resp)
-    handleInput(resp)
+    state.telnetBuffer = (state.telnetBuffer ?: "") + resp
+    def buffer = state.telnetBuffer
+    def lines = buffer.split(/[\r\n]+/) as List
+
+    if (lines && !buffer.endsWith("\r") && !buffer.endsWith("\n")) {
+        state.telnetBuffer = lines.remove(lines.size() - 1)
+    } else {
+        state.telnetBuffer = ""
+    }
+
+    lines.each { line ->
+        line = line?.trim()
+        if (!line || line.length() < 2 || line == "R" || line.startsWith("E")) {
+            return
+        }
+        writeLogDebug("parse line: ${line}")
+        handlePower(line)
+        handleMute(line)
+        handleVolume(line)
+        handleInput(line)
+        handleRgb(line)
+    }
 }
 
 @Field static List PowerCommand = ["P", "AP", "BP", "ZE" ]
+@Field static List PowerQueryCommand = ["P", "AP", "BP", "ZEP" ]
 @Field static List VolumeCommand = ["V", "Z", "Y" ]
 @Field static List Mute = ["M", "Z2M", "Z3M"]
 //ZONE1
@@ -190,7 +241,7 @@ String getCommand(Integer zone, String command){
         }
 
     if (a[0]=="power"){
-        sb.append(PowerCommand[zoneIndex])
+        sb.append(a[1] == "query" ? PowerQueryCommand[zoneIndex] : PowerCommand[zoneIndex])
     }else if(a[0] == "mute" ){
         sb.append(Mute[zoneIndex])
     }else if (a[0] == "volume" ){
@@ -201,6 +252,9 @@ String getCommand(Integer zone, String command){
     }else if (a[0] == "input") {
         if (a[1] == "query") {
             if (zone == 1) {
+                if (a.size() > 2 && a[2] == "alt") {
+                    return "?SLI"
+                }
                 return "?F"
             }
             return "?${InputCommand[zoneIndex]}"
@@ -260,75 +314,148 @@ def getZone(Integer zone){
 }
 
 @Field static List PowerResponse = ["PWR", "APR", "BPR", "ZEP" ]
-def handlePower(String resp){
-    writeLogDebug("handlepower " + resp)
-    if (resp.length() >= 4){
-        def code = resp.substring(0, 3) 
-        def pwrIdx = PowerResponse.indexOf(code)
 
-        if (pwrIdx > -1){
-            def val = resp.substring(3,4)
-            def v = val == "0" ? "on" : "off"
-            sendChildZone(pwrIdx + 1, "power." + v)
+private boolean parsePowerOn(String param, Integer zone) {
+    if (!param) {
+        return false
+    }
+    param = param.trim()
+    // Main zone telnet: PWR0=on. Sub-zones (APR/BPR/ZEP): 1=on, 0=off on many models.
+    if (param.length() <= 2 && param ==~ /[0-2]/) {
+        if (zone == 1) {
+            return param == "0"
+        }
+        return param == "1"
+    }
+    def normalized = param.replaceFirst(/^0+/, "") ?: "0"
+    return normalized != "0"
+}
+
+def handlePower(String line){
+    writeLogDebug("handlePower ${line}")
+    PowerResponse.eachWithIndex { code, idx ->
+        if (line.startsWith(code) && line.length() > code.length()) {
+            def zone = idx + 1
+            if (state.suppressSecondaryZoneStatus && zone >= 2) {
+                writeLogDebug("handlePower suppressed zone ${zone} during input command")
+            } else {
+                def param = line.substring(code.length())
+                def isOn = parsePowerOn(param, zone)
+                sendChildZone(zone, "power." + (isOn ? "on" : "off"))
+            }
         }
     }
 }
 
-@Field static List MuteResponse = ["MUT", "Z2MUT", "Z3MUT"]
-def handleMute(String resp){
-    writeLogDebug("handleMute " + resp)
-    def muteIdx = resp.indexOf("MUT")
-    if (muteIdx > -1){
-        def muteOn = "on"
-        def zone = 1
-        if (muteIdx == 0){
-            if (resp.substring(3, 4) == "1"){
-                muteOn = "off"
-            }
-        }
+private String muteStateFromDigit(String digit) {
+    // MUT0 = muted, MUT1 = unmuted (Pioneer telnet / ISCP)
+    return digit == "1" ? "mute.off" : "mute.on"
+}
 
-        if (muteIdx == 2){
-            if (resp.substring(0, 2) == "Z2"){
-                zone = 2
-            }else{
-                zone = 3
-            }
-        }
-        sendChildZone(zone, "mute." + muteOn)
+def handleMute(String line){
+    writeLogDebug("handleMute ${line}")
+    if (line.startsWith("Z3MUT") && line.length() >= 6) {
+        sendChildZone(3, muteStateFromDigit(line.substring(5, 6)))
+        return
+    }
+    if (line.startsWith("Z2MUT") && line.length() >= 6) {
+        sendChildZone(2, muteStateFromDigit(line.substring(5, 6)))
+        return
+    }
+    def muteIdx = line.indexOf("MUT")
+    if (muteIdx >= 0 && line.length() >= muteIdx + 4) {
+        sendChildZone(1, muteStateFromDigit(line.substring(muteIdx + 3, muteIdx + 4)))
     }
 }
 
 @Field static List VolumeResponse = ["VOL", "ZV", "YV"]
-def handleInput(String resp) {
-    writeLogDebug("handleInput ${resp}")
+private String parseInputCode(String line, int prefixLen) {
+    if (line.length() <= prefixLen) {
+        return null
+    }
+    def raw = line.substring(prefixLen).trim()
+    if (raw.length() >= 2) {
+        return raw[-2..-1]
+    }
+    return raw.padLeft(2, "0")
+}
 
-    if (resp.length() >= 4 && (resp.startsWith("FN") || resp.startsWith("SLI"))) {
-        sendChildZone(1, "input", resp.substring(2, 4))
+def handleInput(String line) {
+    writeLogDebug("handleInput ${line}")
+
+    if (line.startsWith("SLI")) {
+        def code = parseInputCode(line, 3)
+        if (code) sendChildZone(1, "input", code)
         return
     }
 
-    if (resp.length() >= 5 && resp.startsWith("Z2F")) {
-        sendChildZone(2, "input", resp.substring(3, 5))
+    if (line.startsWith("FN")) {
+        def code = parseInputCode(line, 2)
+        if (code) sendChildZone(1, "input", code)
         return
     }
 
-    if (resp.length() >= 5 && resp.startsWith("Z3F")) {
-        sendChildZone(3, "input", resp.substring(3, 5))
+    if (line.startsWith("Z2F") && line.length() >= 5) {
+        sendChildZone(2, "input", line.substring(3, 5))
         return
     }
 
-    if (resp.length() >= 5 && resp.startsWith("ZEA")) {
-        sendChildZone(4, "input", resp.substring(3, 5))
+    if (line.startsWith("Z3F") && line.length() >= 5) {
+        sendChildZone(3, "input", line.substring(3, 5))
         return
     }
 
-    if (resp.length() >= 4 && resp.startsWith("ZS")) {
-        sendChildZone(2, "input", resp.substring(2, 4))
+    if (line.startsWith("ZEA") && line.length() >= 5) {
+        sendChildZone(4, "input", line.substring(3, 5))
         return
     }
 
-    if (resp.length() >= 4 && resp.startsWith("ZT")) {
-        sendChildZone(3, "input", resp.substring(2, 4))
+    if (line.startsWith("ZS") && line.length() >= 4) {
+        def code = parseInputCode(line, 2)
+        if (code) sendChildZone(2, "input", code)
+        return
+    }
+
+    if (line.startsWith("ZT") && line.length() >= 4) {
+        def code = parseInputCode(line, 2)
+        if (code) sendChildZone(3, "input", code)
+    }
+}
+
+def handleRgb(String line) {
+    if (!line.startsWith("RGB") || line.length() <= 6) {
+        return
+    }
+    def responseCode = line.substring(3, 5)
+    def name = line.substring(6).trim()
+    if (!name || name ==~ /^\d+$/) {
+        return
+    }
+    def code = null
+    if (state.pendingRgbIndex != null) {
+        def expected = state.pendingRgbIndex.toString().padLeft(2, "0")
+        if (responseCode != expected) {
+            writeLogDebug("handleRgb skip ${line} (waiting for RGB${expected}..., got RGB${responseCode}...)")
+            return
+        }
+        code = expected
+        state.pendingRgbIndex = null
+        unschedule("clearPendingRgbIndex")
+    } else {
+        code = responseCode
+    }
+    if (!state.deviceInputMap) {
+        state.deviceInputMap = [:]
+    }
+    state.deviceInputMap[code] = name
+    writeLogDebug("input name ${code} = ${name}")
+    syncChildrenInputDisplay()
+}
+
+def clearPendingRgbIndex() {
+    if (state.pendingRgbIndex != null) {
+        writeLogDebug("RGB query timed out for index ${state.pendingRgbIndex}")
+        state.pendingRgbIndex = null
     }
 }
 
@@ -404,6 +531,7 @@ void telnetStatus(String message)
         state.reconnectPending = false
         state.reconnectDelay = 2
         runIn(2, "refresh")
+        runIn(5, "loadInputNamesFromDevice")
     } else if (message.startsWith("failure:") || message.contains("closed")) {
         state.connectionState = "disconnected"
         logConnectionFailure(message)
@@ -457,6 +585,9 @@ def updated()
 
     updateChildren()
 
+    if (settings?.loadInputNamesFromDevice != false) {
+        runIn(8, "loadInputNamesFromDevice")
+    }
     initialize()
     runIn(1800, "healthCheck")
 }
@@ -494,25 +625,161 @@ def setZoneInput(zoneNumber, source) {
 void refresh()
 {
     writeLogInfo("refresh all enabled zones")
-    unschedule("refreshNextZone")
-    state.refreshZoneQueue = []
-    enabledReceiverZones?.each { state.refreshZoneQueue << (it as Integer) }
-    state.refreshZoneIndex = 0
-    refreshNextZone()
+    def queries = []
+    enabledReceiverZones?.each { zoneNum ->
+        queries.addAll(buildZoneRefreshQueries(zoneNum as Integer))
+    }
+    startRefreshQueries(queries)
 }
 
-def refreshNextZone() {
-    def queue = state.refreshZoneQueue ?: []
-    def index = state.refreshZoneIndex as Integer ?: 0
-    if (index >= queue.size()) {
-        state.refreshZoneIndex = 0
+def requestZoneRefresh(Integer zone) {
+    if (!zone) {
         return
     }
-    def child = getZone(queue[index])
-    if (child) child.refresh()
-    state.refreshZoneIndex = index + 1
-    if (state.refreshZoneIndex < queue.size()) {
-        runIn(2, "refreshNextZone")
+    def queries = buildZoneRefreshQueries(zone)
+    if (state.refreshInProgress) {
+        state.pendingRefreshQueries = (state.pendingRefreshQueries ?: []) + queries
+        writeLogDebug("queued refresh for zone ${zone} (${queries.size()} queries)")
+        return
+    }
+    startRefreshQueries(queries)
+}
+
+private List buildZoneRefreshQueries(Integer zone) {
+    def queries = []
+    queries << [zone: zone, cmd: "power.query"]
+    if (zone != 4) {
+        queries << [zone: zone, cmd: "volume.query"]
+        queries << [zone: zone, cmd: "mute.query"]
+    }
+    queries << [zone: zone, cmd: "input.query"]
+    if (zone == 1) {
+        queries << [zone: zone, cmd: "input.query.alt"]
+    }
+    return queries
+}
+
+private void startRefreshQueries(List queries, String queueType = "zone") {
+    unschedule("refreshNextQuery")
+    if (!queries) {
+        state.refreshInProgress = false
+        state.refreshQueueType = null
+        return
+    }
+    state.refreshInProgress = true
+    state.refreshQueueType = queueType
+    state.refreshQueries = queries
+    state.refreshQueryIndex = 0
+    refreshNextQuery()
+}
+
+def refreshNextQuery() {
+    if (state.refreshHoldCount > 0) {
+        runIn(1, "refreshNextQuery")
+        return
+    }
+    def queries = state.refreshQueries ?: []
+    def index = state.refreshQueryIndex as Integer ?: 0
+    if (index >= queries.size()) {
+        if (state.refreshQueueType == "inputNames") {
+            finishInputNameLoad()
+        }
+        state.refreshInProgress = false
+        state.refreshQueueType = null
+        state.refreshQueryIndex = 0
+        def pending = state.pendingRefreshQueries
+        state.pendingRefreshQueries = null
+        if (pending) {
+            startRefreshQueries(pending)
+        } else if (state.pendingInputNameLoad) {
+            state.pendingInputNameLoad = false
+            loadInputNamesFromDevice()
+        }
+        return
+    }
+    def item = queries[index]
+    def telnetCmd = null
+    if (item.type == "inputName") {
+        state.pendingRgbIndex = item.index as Integer
+        unschedule("clearPendingRgbIndex")
+        runIn(3, "clearPendingRgbIndex")
+        telnetCmd = "?RGB${state.pendingRgbIndex.toString().padLeft(2, '0')}"
+    } else {
+        telnetCmd = getCommand(item.zone as Integer, item.cmd as String)
+    }
+    if (telnetCmd) {
+        writeLogDebug("refresh query ${item.type ?: item.cmd} zone ${item.zone}: ${telnetCmd}")
+        sendTelnetMsg(telnetCmd)
+    }
+    state.refreshQueryIndex = index + 1
+    if (state.refreshQueryIndex < queries.size()) {
+        def delay = state.refreshQueueType == "inputNames" ? 1 : 2
+        runIn(delay, "refreshNextQuery")
+    } else {
+        runIn(1, "refreshNextQuery")
+    }
+}
+
+def loadInputNamesFromDevice() {
+    if (settings?.loadInputNamesFromDevice == false) {
+        writeLogDebug("loadInputNamesFromDevice disabled in preferences")
+        return
+    }
+    def maxId = settings?.maxInputNameId as Integer ?: 60
+    maxId = Math.min(Math.max(maxId, 1), 99)
+    def queries = []
+    def priorityIndices = [] as Set
+    enabledReceiverZones?.each { zoneNum ->
+        def child = getZone(zoneNum as Integer)
+        def code = child?.currentValue("input")?.toString()?.trim()
+        if (code && code ==~ /[0-9A-Fa-f]{1,2}/) {
+            priorityIndices << Integer.parseInt(code.padLeft(2, "0"))
+        }
+    }
+    priorityIndices.sort().each { i ->
+        queries << [type: "inputName", index: i]
+    }
+    (0..<maxId).each { i ->
+        if (!priorityIndices.contains(i)) {
+            queries << [type: "inputName", index: i]
+        }
+    }
+    if (state.refreshInProgress) {
+        state.pendingInputNameLoad = true
+        writeLogDebug("input name load queued until refresh completes")
+        return
+    }
+    writeLogInfo("Querying AVR for input names (?RGB00-?RGB${(maxId - 1).toString().padLeft(2, '0')})")
+    startRefreshQueries(queries, "inputNames")
+}
+
+def refreshInputNames() {
+    state.remove("deviceInputMapLoaded")
+    state.deviceInputMap = [:]
+    loadInputNamesFromDevice()
+}
+
+private void finishInputNameLoad() {
+    def count = state.deviceInputMap?.size() ?: 0
+    state.deviceInputMapLoaded = true
+    writeLogInfo("Loaded ${count} input name(s) from AVR")
+    syncChildrenInputDisplay()
+    childDevices.each { child ->
+        try {
+            child.publishSupportedInputs()
+        } catch (e) {
+            writeLogDebug("finishInputNameLoad publish: ${e.message}")
+        }
+    }
+}
+
+private void syncChildrenInputDisplay() {
+    childDevices.each { child ->
+        try {
+            child.updateInputDisplay()
+        } catch (e) {
+            writeLogDebug("syncChildrenInputDisplay: ${e.message}")
+        }
     }
 }
 
@@ -648,18 +915,72 @@ def sendTelnetMsg(String msg)
     sendHubCommand(new hubitat.device.HubAction(finalizeTelnetMessage(msg), hubitat.device.Protocol.TELNET))
 }
 
+private void holdRefreshForCommand() {
+    state.refreshHoldCount = (state.refreshHoldCount ?: 0) + 1
+    unschedule("refreshNextQuery")
+}
+
+private void releaseRefreshHold() {
+    def count = (state.refreshHoldCount ?: 0) - 1
+    state.refreshHoldCount = Math.max(count, 0)
+    if (state.refreshHoldCount == 0 && state.refreshInProgress) {
+        runIn(1, "refreshNextQuery")
+    }
+}
+
+def clearStatusSuppress() {
+    state.suppressSecondaryZoneStatus = false
+}
+
+def cycleZoneInput(Integer zone, Integer direction) {
+    def codes = getInputCycleCodes()
+    if (!codes) {
+        def cmd = getCommand(zone, direction > 0 ? "input.up" : "input.down")
+        sendZoneCommand(zone, cmd, false)
+        return
+    }
+    def child = getZone(zone)
+    if (!child) {
+        return
+    }
+    def current = child.currentValue("input")?.toString()?.padLeft(2, "0")
+    def idx = current ? codes.indexOf(current) : -1
+    if (idx < 0) {
+        idx = 0
+    } else {
+        idx = (idx + direction) % codes.size()
+        if (idx < 0) {
+            idx += codes.size()
+        }
+    }
+    def nextCode = codes[idx]
+    def setCmd = getCommand(zone, "input.set.${nextCode}")
+    if (setCmd) {
+        writeLogInfo("${device.getName()} cycle zone ${zone} input -> ${nextCode}")
+        sendZoneCommand(zone, setCmd, false)
+    }
+}
+
 def sendZoneCommand(Integer zone, String msg, Boolean withZoneSelect = false) {
     if (!msg) {
         return
     }
+    holdRefreshForCommand()
+    state.suppressSecondaryZoneStatus = true
+    unschedule("clearStatusSuppress")
+    runIn(4, "clearStatusSuppress")
+
     def selectCmd = withZoneSelect ? getZoneSelectCommand(zone) : null
     if (selectCmd) {
         writeLogInfo("${device.getName()} zone ${zone} select: ${selectCmd}, then: ${msg}")
         state.pendingZoneCommand = msg
         sendTelnetMsg(selectCmd)
         runIn(getZoneSelectDelaySec(), "sendPendingZoneCommand")
+        runIn(getZoneSelectDelaySec() + 2, "releaseRefreshHold")
     } else {
+        writeLogDebug("${device.getName()} zone ${zone} command: ${msg}")
         sendTelnetMsg(msg)
+        runIn(2, "releaseRefreshHold")
     }
 }
 

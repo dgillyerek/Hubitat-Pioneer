@@ -4,11 +4,10 @@ import time
 IP = "192.168.86.74"
 PORT = 23
 QUERIES = [
-    "?P", "?V", "?M", "?FN",
-    "?PWR", "?VOL", "?MUT", "?SLI",
+    "?P", "?V", "?M", "?F", "?FN",
+    "?RGC", "?RGB00", "?RGB05", "?RGB19", "?RGB25", "?RGB06",
     "?AP", "?ZV", "?Z2M",
-    "?BP", "?YV", "?Z3M",
-    "?ZE",
+    "?ZEA", "?ZEP",
 ]
 
 

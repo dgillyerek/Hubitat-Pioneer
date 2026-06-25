@@ -29,6 +29,11 @@
     2026-06-21      0.7.0               Derek Gilbert       Input switching, power-on-before-input
     2026-06-21      0.7.1               Derek Gilbert       HD Zone input cycling
     2026-06-21      0.7.2               Derek Gilbert       Zone select before input, native ZEC/ZEB
+    2026-06-21      0.7.3               Derek Gilbert       PushableButton for Hubitat dashboard tiles
+    2026-06-21      0.7.4               Derek Gilbert       Refresh via parent query queue
+    2026-06-21      0.7.6               Derek Gilbert       Input next power-on, no ZEO on cycle
+    2026-06-21      0.7.7               Derek Gilbert       updateInputDisplay for custom names
+    2026-06-21      0.7.8               Derek Gilbert       RGB response code validation
   
 */
 
@@ -43,29 +48,32 @@ metadata
 		capability "AudioVolume"
 		capability "Actuator"
 		capability "MediaInputSource"
+		capability "PushableButton"
 
 		attribute "input", "string"
 		attribute "mute", "string"
 		attribute "volume", "string"
+		attribute "numberOfButtons", "number"
 
         command "muteToggle"
         command "setInputSourceRaw", [[name:"Source Code*", type: "STRING", description: "Two-digit Pioneer input code (e.g. 05, 19, 25)"]]
         command "inputNext"
         command "inputPrevious"
+        command "push", [[name: "buttonNumber", type: "NUMBER", description: "1=Input+, 2=Input-, 3=Vol+, 4=Vol-, 5=Mute"]]
 	}
 
 	preferences 
 	{   
 		input name: "textLogging",  type: "bool", title: "Enable description text logging ", required: true, defaultValue: true
         input name: "powerOnBeforeInput", type: "bool", title: "Power on zone before changing input", required: true, defaultValue: true
-        input name: "selectZoneBeforeInput", type: "bool", title: "Send zone-select command before input change", required: true, defaultValue: true, description: "Uses parent 'Zone select commands before input'. Required on some receivers before HD Zone input will change."
+        input name: "selectZoneBeforeInput", type: "bool", title: "Send zone-select command before direct input set", required: true, defaultValue: true, description: "Uses parent 'Zone select commands before input' for setInputSource only. Input Next/Previous does not send zone-select (ZEO can disrupt audio)."
         input name: "debugOutput", type: "bool", title: "Enable debug logging", defaultValue: true
     }
 }
 
 def getVersion()
 {
-    return "0.7.2"
+    return "0.7.8"
 }
 
 void parse(String description) 
@@ -82,6 +90,7 @@ def initialize()
 def installed()
 {
     log.warn "${getFullDeviceName()} installed..."
+    publishButtonCount()
     publishSupportedInputs()
     updated()
 }
@@ -103,6 +112,7 @@ def updated()
     state.version = getVersion()
     unschedule()
     publishSupportedInputs()
+    publishButtonCount()
 
 	// disable debug logs after 30 min
 	if (debugOutput) 
@@ -115,32 +125,7 @@ void refresh()
 {
     writeLogInfo("${getFullDeviceName()} refresh")
     unschedule("refreshNextAttribute")
-    state.refreshStep = 0
-    refreshNextAttribute()
-}
-
-def refreshNextAttribute() {
-    def zone = getCurrentZone()
-    def commands = ["power.query", "volume.query", "mute.query", "input.query"]
-    def step = state.refreshStep as Integer ?: 0
-
-    while (step < commands.size()) {
-        def cmd = commands[step]
-        step++
-        if (zone == 4 && (cmd.startsWith("volume") || cmd.startsWith("mute"))) {
-            continue
-        }
-        def telnetCmd = getCommand(cmd)
-        if (telnetCmd) {
-            sendCommand(telnetCmd)
-        }
-        state.refreshStep = step
-        if (step < commands.size()) {
-            runIn(1, "refreshNextAttribute")
-        }
-        return
-    }
-    state.refreshStep = 0
+    parent.requestZoneRefresh(getCurrentZone())
 }
 
 def logsOff() 
@@ -224,28 +209,73 @@ private void queueInputSource(String code) {
 def applyInputSource(data) {
     def telnetCmd = getCommand("input.set.${data.code}")
     if (telnetCmd) {
-        sendInputCommand(telnetCmd)
+        def zone = getCurrentZone()
+        def withSelect = settings?.selectZoneBeforeInput != false && zone >= 2
+        sendInputCommand(telnetCmd, withSelect)
     }
 }
 
 def inputNext() {
-    def telnetCmd = getCommand("input.up")
-    if (telnetCmd) {
-        sendInputCommand(telnetCmd)
-    }
+    queueInputChange(1)
 }
 
 def inputPrevious() {
-    def telnetCmd = getCommand("input.down")
-    if (telnetCmd) {
-        sendInputCommand(telnetCmd)
+    queueInputChange(-1)
+}
+
+private void queueInputChange(Integer direction) {
+    if (settings?.powerOnBeforeInput != false && device.currentValue("switch") == "off") {
+        on()
+        runIn(2, "applyInputChange", [data: [direction: direction]])
+    } else {
+        applyInputChange([direction: direction])
     }
 }
 
-private void sendInputCommand(String telnetCmd) {
+def applyInputChange(data) {
+    def direction = data.direction as Integer
+    if (parent.getInputCycleCodes()) {
+        parent.cycleZoneInput(getCurrentZone(), direction)
+        return
+    }
+    def telnetCmd = getCommand(direction > 0 ? "input.up" : "input.down")
+    if (telnetCmd) {
+        sendInputCommand(telnetCmd, false)
+    }
+}
+
+def push(button) {
+    pushed(button)
+}
+
+def pushed(button) {
     def zone = getCurrentZone()
-    def withSelect = settings?.selectZoneBeforeInput != false && zone >= 2
-    parent.sendZoneCommand(zone, telnetCmd, withSelect)
+    switch (button as Integer) {
+        case 1: inputNext(); break
+        case 2: inputPrevious(); break
+        case 3:
+            if (zone != 4) volumeUp()
+            break
+        case 4:
+            if (zone != 4) volumeDown()
+            break
+        case 5:
+            if (zone != 4) muteToggle()
+            break
+        default:
+            log.warn "${getFullDeviceName()} unknown button ${button}"
+    }
+    sendEvent(name: "pushed", value: button, descriptionText: "Button ${button} pushed")
+}
+
+def publishButtonCount() {
+    def zone = state.zone?.Zone as Integer
+    def count = (zone == 4) ? 2 : 5
+    sendEvent(name: "numberOfButtons", value: count)
+}
+
+private void sendInputCommand(String telnetCmd, Boolean withZoneSelect = false) {
+    parent.sendZoneCommand(getCurrentZone(), telnetCmd, withZoneSelect)
 }
 
 def publishSupportedInputs() {
@@ -322,11 +352,23 @@ def fromA(String command, String value) {
         writeLogInfo("${getFullDeviceName()} volume is ${value}")
         sendEvent(name: "volume", value: value)
     } else if (command == "input") {
-        def sourceName = parent.getInputName(value)
-        writeLogInfo("${getFullDeviceName()} input is ${sourceName} (${value})")
-        sendEvent(name: "input", value: value)
-        sendEvent(name: "mediaInputSource", value: sourceName)
+        applyInputDisplay(value)
     }
+}
+
+def updateInputDisplay() {
+    def code = device.currentValue("input")?.toString()?.trim()
+    if (code) {
+        applyInputDisplay(code)
+    }
+}
+
+private void applyInputDisplay(String code) {
+    def normalized = code.toString().trim().padLeft(2, "0")
+    def sourceName = parent.getInputName(normalized)
+    writeLogInfo("${getFullDeviceName()} input is ${sourceName} (${normalized})")
+    sendEvent(name: "input", value: normalized)
+    sendEvent(name: "mediaInputSource", value: sourceName)
 }
 
 def String getFullDeviceName()
