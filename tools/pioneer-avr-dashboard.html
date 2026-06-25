@@ -297,8 +297,11 @@
   </dialog>
 
   <script>
-    const PIONEER_DASHBOARD_VERSION = "1.0.0";
+    const PIONEER_DASHBOARD_VERSION = "1.0.1";
     const STORAGE_KEY = "pioneer.avr.remote.cfg";
+    const NORMAL_REFRESH_MS = 8000;
+    const FAST_REFRESH_MS = 1500;
+    const FAST_REFRESH_DURATION_MS = 15000;
 
     let cfg = {
       hubIp: "",
@@ -321,6 +324,10 @@
       hdPower: document.getElementById("hdPower"),
       hdZone: document.getElementById("hdZone"),
     };
+
+    let refreshTimer = null;
+    let refreshInFlight = false;
+    let fastRefreshUntil = 0;
 
     function loadStoredCfg() {
       try {
@@ -402,6 +409,10 @@
         setMsg("Configure connection (⚙)", true);
         return;
       }
+      if (refreshInFlight) {
+        return;
+      }
+      refreshInFlight = true;
       try {
         await refreshZone(cfg.mainDeviceId, "main");
         if (cfg.hdZoneDeviceId) {
@@ -414,7 +425,32 @@
         setMsg("Updated " + new Date().toLocaleTimeString());
       } catch (e) {
         setMsg(e.message, true);
+      } finally {
+        refreshInFlight = false;
       }
+    }
+
+    function scheduleRefresh() {
+      if (refreshTimer) {
+        clearTimeout(refreshTimer);
+      }
+      const delay = Date.now() < fastRefreshUntil ? FAST_REFRESH_MS : NORMAL_REFRESH_MS;
+      refreshTimer = setTimeout(async () => {
+        await refreshAll();
+        scheduleRefresh();
+      }, delay);
+    }
+
+    function burstRefresh() {
+      fastRefreshUntil = Date.now() + FAST_REFRESH_DURATION_MS;
+      refreshAll();
+      scheduleRefresh();
+    }
+
+    async function runCommand(deviceId, command, label) {
+      await hubCmd(deviceId, command);
+      setMsg(label);
+      burstRefresh();
     }
 
     async function togglePower(deviceId, prefix) {
@@ -422,7 +458,7 @@
       const cmd = attr(d, "switch") === "on" ? "off" : "on";
       await hubCmd(deviceId, cmd);
       setMsg(`${prefix} power ${cmd}`);
-      setTimeout(refreshAll, 1200);
+      burstRefresh();
     }
 
     async function loadTokenFile() {
@@ -443,30 +479,32 @@
     }
 
     function bindButtons() {
+      const err = (e) => setMsg(e.message, true);
+
       document.getElementById("mainInNext").onclick = () =>
-        hubCmd(cfg.mainDeviceId, "inputNext").then(() => { setMsg("Main input +"); setTimeout(refreshAll, 1500); }).catch((e) => setMsg(e.message, true));
+        runCommand(cfg.mainDeviceId, "inputNext", "Main input +").catch(err);
       document.getElementById("mainInPrev").onclick = () =>
-        hubCmd(cfg.mainDeviceId, "inputPrevious").then(() => { setMsg("Main input −"); setTimeout(refreshAll, 1500); }).catch((e) => setMsg(e.message, true));
+        runCommand(cfg.mainDeviceId, "inputPrevious", "Main input −").catch(err);
       document.getElementById("mainVolUp").onclick = () =>
-        hubCmd(cfg.mainDeviceId, "volumeUp").then(() => { setMsg("Volume +"); setTimeout(refreshAll, 800); }).catch((e) => setMsg(e.message, true));
+        runCommand(cfg.mainDeviceId, "volumeUp", "Volume +").catch(err);
       document.getElementById("mainVolDown").onclick = () =>
-        hubCmd(cfg.mainDeviceId, "volumeDown").then(() => { setMsg("Volume −"); setTimeout(refreshAll, 800); }).catch((e) => setMsg(e.message, true));
+        runCommand(cfg.mainDeviceId, "volumeDown", "Volume −").catch(err);
       document.getElementById("mainMute").onclick = () =>
-        hubCmd(cfg.mainDeviceId, "muteToggle").then(() => { setMsg("Mute toggled"); setTimeout(refreshAll, 800); }).catch((e) => setMsg(e.message, true));
+        runCommand(cfg.mainDeviceId, "muteToggle", "Mute toggled").catch(err);
       document.getElementById("mainPower").onclick = () =>
-        togglePower(cfg.mainDeviceId, "Main").catch((e) => setMsg(e.message, true));
+        togglePower(cfg.mainDeviceId, "Main").catch(err);
 
       document.getElementById("hdInNext").onclick = () => {
         if (!cfg.hdZoneDeviceId) return setMsg("HD Zone not configured", true);
-        hubCmd(cfg.hdZoneDeviceId, "inputNext").then(() => { setMsg("HD input +"); setTimeout(refreshAll, 1500); }).catch((e) => setMsg(e.message, true));
+        runCommand(cfg.hdZoneDeviceId, "inputNext", "HD input +").catch(err);
       };
       document.getElementById("hdInPrev").onclick = () => {
         if (!cfg.hdZoneDeviceId) return setMsg("HD Zone not configured", true);
-        hubCmd(cfg.hdZoneDeviceId, "inputPrevious").then(() => { setMsg("HD input −"); setTimeout(refreshAll, 1500); }).catch((e) => setMsg(e.message, true));
+        runCommand(cfg.hdZoneDeviceId, "inputPrevious", "HD input −").catch(err);
       };
       document.getElementById("hdPower").onclick = () => {
         if (!cfg.hdZoneDeviceId) return setMsg("HD Zone not configured", true);
-        togglePower(cfg.hdZoneDeviceId, "HD").catch((e) => setMsg(e.message, true));
+        togglePower(cfg.hdZoneDeviceId, "HD").catch(err);
       };
     }
 
@@ -489,7 +527,7 @@
       saveStoredCfg();
       dialog.close();
       els.hubLabel.textContent = cfg.hubIp ? `Hub ${cfg.hubIp}` : "Not configured";
-      refreshAll();
+      burstRefresh();
     };
 
     (async function init() {
@@ -498,7 +536,7 @@
       els.hubLabel.textContent = cfg.hubIp ? `Hub ${cfg.hubIp} · v${PIONEER_DASHBOARD_VERSION}` : "Open via hub /local/ URL";
       bindButtons();
       await refreshAll();
-      setInterval(refreshAll, 8000);
+      scheduleRefresh();
     })();
   </script>
 </body>
