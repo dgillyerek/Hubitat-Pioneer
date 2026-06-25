@@ -34,6 +34,7 @@
     2026-06-21      0.7.6               Derek Gilbert       Input next queue/hold, no ZEO on cycle
     2026-06-21      0.7.7               Derek Gilbert       Input name display sync after RGB load
     2026-06-21      0.7.8               Derek Gilbert       Match RGB response code to query index
+    2026-06-21      0.7.9               Derek Gilbert       Fast single-attribute status query after commands
   
 */
 
@@ -78,7 +79,7 @@ metadata
 
 def getVersion()
 {
-    return "0.7.8"
+    return "0.7.9"
 }
 
 List getInputCycleCodes() {
@@ -645,6 +646,27 @@ def requestZoneRefresh(Integer zone) {
     startRefreshQueries(queries)
 }
 
+def requestFastStatusQuery(Integer zone, String attributeGroup) {
+    if (!zone || !attributeGroup) {
+        return
+    }
+    def cmd = getCommand(zone, "${attributeGroup}.query")
+    if (!cmd) {
+        return
+    }
+    def delaySec = attributeGroup == "power" ? 0.6 : 0.35
+    runIn(delaySec, "sendFastStatusQuery", [data: [zone: zone, attr: attributeGroup, cmd: cmd]])
+}
+
+def sendFastStatusQuery(data) {
+    if (state.refreshHoldCount > 0) {
+        runIn(1, "sendFastStatusQuery", [data: data])
+        return
+    }
+    writeLogDebug("fast status query zone ${data.zone} ${data.attr}: ${data.cmd}")
+    sendTelnetMsg(data.cmd as String)
+}
+
 private List buildZoneRefreshQueries(Integer zone) {
     def queries = []
     queries << [zone: zone, cmd: "power.query"]
@@ -713,7 +735,7 @@ def refreshNextQuery() {
     }
     state.refreshQueryIndex = index + 1
     if (state.refreshQueryIndex < queries.size()) {
-        def delay = state.refreshQueueType == "inputNames" ? 1 : 2
+        def delay = state.refreshQueueType == "inputNames" ? 1 : 1
         runIn(delay, "refreshNextQuery")
     } else {
         runIn(1, "refreshNextQuery")

@@ -34,6 +34,7 @@
     2026-06-21      0.7.6               Derek Gilbert       Input next power-on, no ZEO on cycle
     2026-06-21      0.7.7               Derek Gilbert       updateInputDisplay for custom names
     2026-06-21      0.7.8               Derek Gilbert       RGB response code validation
+    2026-06-21      0.7.9               Derek Gilbert       Optimistic mute, fast status query after commands
   
 */
 
@@ -73,7 +74,7 @@ metadata
 
 def getVersion()
 {
-    return "0.7.8"
+    return "0.7.9"
 }
 
 void parse(String description) 
@@ -155,21 +156,27 @@ def setZone(Integer targetZone)
 def on() 
 {
     sendCommand(getCommand("power.on"))
+    parent.requestFastStatusQuery(getCurrentZone(), "power")
 }
 
 def off()
 {
     sendCommand(getCommand("power.off"))
+    parent.requestFastStatusQuery(getCurrentZone(), "power")
 }
 
 def mute()
 {
+    sendEvent(name: "mute", value: "muted")
     sendCommand(getCommand("mute.on"))
+    parent.requestFastStatusQuery(getCurrentZone(), "mute")
 }
 
 def unmute()
 {
+    sendEvent(name: "mute", value: "unmuted")
     sendCommand(getCommand("mute.off"))
+    parent.requestFastStatusQuery(getCurrentZone(), "mute")
 }
 
 def muteToggle()
@@ -299,11 +306,13 @@ def refreshVolume()
 def volumeUp()
 {
     sendCommand(getCommand("volume.up"))
+    parent.requestFastStatusQuery(getCurrentZone(), "volume")
 }
 
 def volumeDown()
 {
-    sendCommand(getCommand("volume.down"))    
+    sendCommand(getCommand("volume.down"))
+    parent.requestFastStatusQuery(getCurrentZone(), "volume")
 }
 
 def getCommand(String command){

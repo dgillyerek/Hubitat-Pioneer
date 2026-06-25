@@ -297,11 +297,13 @@
   </dialog>
 
   <script>
-    const PIONEER_DASHBOARD_VERSION = "1.0.1";
+    const PIONEER_DASHBOARD_VERSION = "1.0.2";
     const STORAGE_KEY = "pioneer.avr.remote.cfg";
     const NORMAL_REFRESH_MS = 8000;
-    const FAST_REFRESH_MS = 1500;
+    const FAST_REFRESH_MS = 500;
     const FAST_REFRESH_DURATION_MS = 15000;
+    const BURST_POLL_MS = 250;
+    const BURST_POLL_DURATION_MS = 3000;
 
     let cfg = {
       hubIp: "",
@@ -327,7 +329,13 @@
 
     let refreshTimer = null;
     let refreshInFlight = false;
+    let refreshPending = false;
+    let burstPollTimer = null;
     let fastRefreshUntil = 0;
+
+    function sleep(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
 
     function loadStoredCfg() {
       try {
@@ -386,6 +394,18 @@
       btn.className = "btn power " + (isOn ? "on" : "off-state");
     }
 
+    function setMainMuteUi(vol, isMuted) {
+      els.mainMeta.textContent = `Volume ${vol} · ${isMuted ? "Muted" : "Unmuted"}`;
+      document.getElementById("mainMute").textContent = isMuted ? "Unmute" : "Mute";
+    }
+
+    function optimisticMuteToggle() {
+      const muteBtn = document.getElementById("mainMute");
+      const volMatch = els.mainMeta.textContent.match(/^Volume ([^·]+)/);
+      const vol = volMatch ? volMatch[1].trim() : "—";
+      setMainMuteUi(vol, muteBtn.textContent !== "Unmute");
+    }
+
     function inputLabel(device) {
       return attr(device, "mediaInputSource") || attr(device, "input") || "—";
     }
@@ -399,8 +419,7 @@
       if (prefix === "main") {
         const vol = attr(d, "volume") || "—";
         const mute = attr(d, "mute") || "—";
-        els.mainMeta.textContent = `Volume ${vol} · ${mute === "muted" ? "Muted" : "Unmuted"}`;
-        document.getElementById("mainMute").textContent = mute === "muted" ? "Unmute" : "Mute";
+        setMainMuteUi(vol, mute === "muted");
       }
     }
 
@@ -410,6 +429,7 @@
         return;
       }
       if (refreshInFlight) {
+        refreshPending = true;
         return;
       }
       refreshInFlight = true;
@@ -427,6 +447,22 @@
         setMsg(e.message, true);
       } finally {
         refreshInFlight = false;
+        if (refreshPending) {
+          refreshPending = false;
+          refreshAll();
+        }
+      }
+    }
+
+    async function pollBurstRefresh() {
+      if (burstPollTimer) {
+        clearTimeout(burstPollTimer);
+        burstPollTimer = null;
+      }
+      const deadline = Date.now() + BURST_POLL_DURATION_MS;
+      while (Date.now() < deadline) {
+        await refreshAll();
+        await sleep(BURST_POLL_MS);
       }
     }
 
@@ -444,10 +480,14 @@
     function burstRefresh() {
       fastRefreshUntil = Date.now() + FAST_REFRESH_DURATION_MS;
       refreshAll();
+      pollBurstRefresh();
       scheduleRefresh();
     }
 
-    async function runCommand(deviceId, command, label) {
+    async function runCommand(deviceId, command, label, optimistic) {
+      if (typeof optimistic === "function") {
+        optimistic();
+      }
       await hubCmd(deviceId, command);
       setMsg(label);
       burstRefresh();
@@ -490,7 +530,7 @@
       document.getElementById("mainVolDown").onclick = () =>
         runCommand(cfg.mainDeviceId, "volumeDown", "Volume −").catch(err);
       document.getElementById("mainMute").onclick = () =>
-        runCommand(cfg.mainDeviceId, "muteToggle", "Mute toggled").catch(err);
+        runCommand(cfg.mainDeviceId, "muteToggle", "Mute toggled", optimisticMuteToggle).catch(err);
       document.getElementById("mainPower").onclick = () =>
         togglePower(cfg.mainDeviceId, "Main").catch(err);
 
