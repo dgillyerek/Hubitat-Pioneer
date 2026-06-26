@@ -314,7 +314,7 @@
   </dialog>
 
   <script>
-    const PIONEER_DASHBOARD_VERSION = "1.0.7";
+    const PIONEER_DASHBOARD_VERSION = "1.0.8";
     const STORAGE_KEY = "pioneer.avr.remote.cfg";
     const DEBUG = new URLSearchParams(location.search).has("debug");
     const NORMAL_REFRESH_MS = 8000;
@@ -352,7 +352,6 @@
     let burstPollTimer = null;
     let fastRefreshUntil = 0;
     let volumeRefreshRequested = false;
-    let volumeFreshUntil = 0;
     let lastLocalVolume = null;
 
     function sleep(ms) {
@@ -405,10 +404,10 @@
       setPowerUi(els.mainPowerPill, els.mainPower, on);
       els.mainInput.textContent = inputFromState(state);
       let vol = volumeFromState(state);
-      if (Date.now() < volumeFreshUntil && lastLocalVolume) {
-        vol = lastLocalVolume;
-      } else if (vol) {
+      if (vol) {
         lastLocalVolume = vol;
+      } else if (lastLocalVolume) {
+        vol = lastLocalVolume;
       }
       setMainStatusUi(vol, state.mute === "muted");
       return true;
@@ -428,9 +427,10 @@
       return `http://${cfg.hubIp}/apps/api/${cfg.makerAppId}`;
     }
 
-    function apiUrl(deviceId, command) {
+    function apiUrl(deviceId, command, param) {
       const q = `access_token=${encodeURIComponent(cfg.makerAccessToken)}`;
-      return `${apiBase()}/devices/${deviceId}/${command}?${q}`;
+      const path = param != null && param !== "" ? `${command}/${encodeURIComponent(param)}` : command;
+      return `${apiBase()}/devices/${deviceId}/${path}?${q}`;
     }
 
     function deviceUrl(deviceId) {
@@ -553,9 +553,28 @@
       return fetchVolumeFromEvents(deviceId);
     }
 
-    async function hubCmd(deviceId, command) {
-      const res = await fetch(apiUrl(deviceId, command), { method: "POST" });
-      if (!res.ok) throw new Error(`${command} failed (${res.status})`);
+    async function hubCmd(deviceId, command, param) {
+      const url = apiUrl(deviceId, command, param);
+      let res = await fetch(url, { method: "GET" });
+      if (!res.ok) {
+        res = await fetch(url, { method: "POST" });
+      }
+      if (!res.ok) {
+        throw new Error(`${command}${param != null ? "/" + param : ""} failed (${res.status})`);
+      }
+    }
+
+    async function sendVolumeCommand(direction) {
+      optimisticVolumeStep(direction);
+      const cmd = direction > 0 ? "volumeUp" : "volumeDown";
+      try {
+        await hubCmd(cfg.mainDeviceId, cmd);
+      } catch (e) {
+        await hubCmd(cfg.mainDeviceId, "push", direction > 0 ? 3 : 4);
+      }
+      setMsg(direction > 0 ? "Volume +" : "Volume −");
+      pollVolumeDbAfterCommand();
+      burstRefresh();
     }
 
     async function hubGet(deviceId) {
@@ -629,15 +648,13 @@
     }
 
     async function pollVolumeDbAfterCommand() {
-      volumeFreshUntil = Date.now() + 3500;
-      const deadline = Date.now() + 3000;
+      const deadline = Date.now() + 2000;
       while (Date.now() < deadline) {
         const vol = await fetchVolumeDbDirect();
         if (vol) {
           lastLocalVolume = vol;
           const isMuted = document.getElementById("mainMute").textContent === "Unmute";
           setMainStatusUi(vol, isMuted);
-          volumeFreshUntil = Date.now() + 800;
           return;
         }
         await sleep(200);
@@ -696,7 +713,6 @@
       const next = Math.min(12, Math.max(-80, db + delta * 0.5));
       const label = formatVolumeDb(next);
       lastLocalVolume = label;
-      volumeFreshUntil = Date.now() + 3500;
       const isMuted = document.getElementById("mainMute").textContent === "Unmute";
       setMainStatusUi(label, isMuted);
     }
@@ -742,10 +758,10 @@
             vol = (await resolveVolume(deviceId, updated)) || vol;
           }
         }
-        if (Date.now() < volumeFreshUntil && lastLocalVolume) {
-          vol = lastLocalVolume;
-        } else if (vol) {
+        if (vol) {
           lastLocalVolume = vol;
+        } else if (lastLocalVolume) {
+          vol = lastLocalVolume;
         }
         setMainStatusUi(vol, mute === "muted");
         if (DEBUG && !vol) {
@@ -840,9 +856,6 @@
       }
       await hubCmd(deviceId, command);
       setMsg(label);
-      if (command === "volumeUp" || command === "volumeDown") {
-        pollVolumeDbAfterCommand();
-      }
       burstRefresh();
     }
 
@@ -878,10 +891,8 @@
         runCommand(cfg.mainDeviceId, "inputNext", "Main input +").catch(err);
       document.getElementById("mainInPrev").onclick = () =>
         runCommand(cfg.mainDeviceId, "inputPrevious", "Main input −").catch(err);
-      document.getElementById("mainVolUp").onclick = () =>
-        runCommand(cfg.mainDeviceId, "volumeUp", "Volume +", () => optimisticVolumeStep(1)).catch(err);
-      document.getElementById("mainVolDown").onclick = () =>
-        runCommand(cfg.mainDeviceId, "volumeDown", "Volume −", () => optimisticVolumeStep(-1)).catch(err);
+      document.getElementById("mainVolUp").onclick = () => sendVolumeCommand(1).catch(err);
+      document.getElementById("mainVolDown").onclick = () => sendVolumeCommand(-1).catch(err);
       document.getElementById("mainMute").onclick = () =>
         runCommand(cfg.mainDeviceId, "muteToggle", "Mute toggled", optimisticMuteToggle).catch(err);
       document.getElementById("mainPower").onclick = () =>

@@ -38,6 +38,7 @@
     2026-06-21      0.7.10              Derek Gilbert       Mirror volume dB to AudioVolume level attribute
     2026-06-21      0.7.11              Derek Gilbert       volumeDb attribute for Maker API (volume is NUMBER)
     2026-06-21      0.7.12              Derek Gilbert       Optimistic volumeDb on volume up/down
+    2026-06-21      0.7.13              Derek Gilbert       Safe volume optimistic; never block telnet command
   
 */
 
@@ -77,7 +78,7 @@ metadata
 
 def getVersion()
 {
-    return "0.7.12"
+    return "0.7.13"
 }
 
 void parse(String description) 
@@ -309,26 +310,34 @@ def refreshVolume()
 
 def volumeUp()
 {
-    optimisticVolumeAdjust(0.5)
+    try {
+        optimisticVolumeAdjust(0.5d)
+    } catch (e) {
+        log.warn "${getFullDeviceName()} optimisticVolumeAdjust: ${e.message}"
+    }
     sendCommand(getCommand("volume.up"))
     parent.requestFastStatusQuery(getCurrentZone(), "volume")
 }
 
 def volumeDown()
 {
-    optimisticVolumeAdjust(-0.5)
+    try {
+        optimisticVolumeAdjust(-0.5d)
+    } catch (e) {
+        log.warn "${getFullDeviceName()} optimisticVolumeAdjust: ${e.message}"
+    }
     sendCommand(getCommand("volume.down"))
     parent.requestFastStatusQuery(getCurrentZone(), "volume")
 }
 
-private void optimisticVolumeAdjust(BigDecimal deltaDb) {
+private void optimisticVolumeAdjust(double deltaDb) {
     def current = device.currentValue("volumeDb")?.toString()
     if (!current) {
         return
     }
     if (current.toUpperCase().contains("MIN")) {
         if (deltaDb > 0) {
-            publishVolume(String.format("%.1fdB", -79.5d))
+            publishVolume("-79.5dB")
         }
         return
     }
@@ -336,12 +345,12 @@ private void optimisticVolumeAdjust(BigDecimal deltaDb) {
     if (!m.find()) {
         return
     }
-    def db = (m.group(1) as BigDecimal) + deltaDb
-    db = Math.min(new BigDecimal("12"), Math.max(new BigDecimal("-80"), db))
-    if (db <= -80) {
+    double db = (m.group(1) as double) + deltaDb
+    db = Math.min(12d, Math.max(-80d, db))
+    if (db <= -80d) {
         publishVolume("MIN-db")
     } else {
-        publishVolume(String.format("%.1fdB", db.doubleValue()))
+        publishVolume(String.format("%.1f", db) + "dB")
     }
 }
 

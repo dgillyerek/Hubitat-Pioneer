@@ -221,7 +221,7 @@ String TranslateVolumeLevel(Float step, Integer val, Integer zeroVal){
     }
 
     def db = (val - zeroVal) * step
-    return String.format("%.1fdB", db)
+    return String.format("%.1f", db) + "dB"
 }
 
 String getCommand(Integer zone, String command){
