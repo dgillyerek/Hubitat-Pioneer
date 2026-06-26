@@ -381,7 +381,7 @@
   </dialog>
 
   <script>
-    const PIONEER_DASHBOARD_VERSION = "1.1.0";
+    const PIONEER_DASHBOARD_VERSION = "1.1.1";
     const STORAGE_KEY = "pioneer.avr.remote.cfg";
     const DEBUG = new URLSearchParams(location.search).has("debug");
     const NORMAL_REFRESH_MS = 8000;
@@ -498,7 +498,17 @@
       return true;
     }
 
+    function isHubHosted() {
+      return location.protocol.startsWith("http") && /\/local\//.test(location.pathname);
+    }
+
     function apiBase() {
+      if (isHubHosted()) {
+        return `/apps/api/${cfg.makerAppId}`;
+      }
+      if (!cfg.hubIp) {
+        throw new Error("Hub IP not configured");
+      }
       return `http://${cfg.hubIp}/apps/api/${cfg.makerAppId}`;
     }
 
@@ -632,12 +642,16 @@
 
     async function hubCmd(deviceId, command, param) {
       const url = apiUrl(deviceId, command, param);
-      let res = await fetch(url, { method: "GET" });
+      let res = await fetch(url, { method: "POST" });
       if (!res.ok) {
-        res = await fetch(url, { method: "POST" });
+        res = await fetch(url, { method: "GET" });
       }
       if (!res.ok) {
-        throw new Error(`${command}${param != null ? "/" + param : ""} failed (${res.status})`);
+        const body = await res.text().catch(() => "");
+        throw new Error(
+          `${command}${param != null ? "/" + param : ""} failed (${res.status})` +
+          (body ? `: ${body.slice(0, 120)}` : "")
+        );
       }
     }
 
@@ -829,6 +843,13 @@
       return Number.isInteger(n) ? String(n) : n.toFixed(1);
     }
 
+    function hasThermoData(state) {
+      return state &&
+        (state.temperature != null ||
+         state.heatingSetpoint != null ||
+         state.coolingSetpoint != null);
+    }
+
     function setThermoUi(state) {
       if (!state) {
         return false;
@@ -889,16 +910,72 @@
       els.thermoMeta.textContent = `Heat ${heat}° · Cool ${cool}°`;
     }
 
+    async function thermoStateFromApi(deviceId) {
+      try {
+        const d = await hubGet(deviceId);
+        const state = thermoStateFromDevice(d);
+        if (hasThermoData(state)) {
+          return state;
+        }
+      } catch (e) {
+        if (DEBUG) {
+          console.warn("thermostat hubGet failed", e);
+        }
+      }
+      const names = [
+        "temperature", "heatingSetpoint", "coolingSetpoint",
+        "thermostatFanMode", "thermostatOperatingState", "thermostatMode",
+      ];
+      const state = {};
+      for (const name of names) {
+        state[name] = await fetchMakerAttribute(deviceId, name);
+      }
+      return state;
+    }
+
     async function refreshThermostat() {
       if (!cfg.thermostatDeviceId) {
         els.thermoZone.style.opacity = "0.45";
         els.thermoTemp.innerHTML = "—<span class=\"unit\">°</span>";
-        els.thermoMeta.textContent = "Not configured";
+        els.thermoMeta.textContent = "Not configured — set device ID in ⚙ (e.g. 252)";
         return;
       }
+      if (!cfg.makerAccessToken) {
+        throw new Error("Maker API token not configured");
+      }
       els.thermoZone.style.opacity = "1";
-      const d = await hubGet(cfg.thermostatDeviceId);
-      setThermoUi(thermoStateFromDevice(d));
+      const state = await thermoStateFromApi(cfg.thermostatDeviceId);
+      if (!hasThermoData(state)) {
+        throw new Error("No thermostat data from Maker API for device " + cfg.thermostatDeviceId);
+      }
+      setThermoUi(state);
+    }
+
+    async function pollThermostatAfterCommand() {
+      const deadline = Date.now() + 4000;
+      while (Date.now() < deadline) {
+        try {
+          const state = await thermoStateFromApi(cfg.thermostatDeviceId);
+          if (hasThermoData(state)) {
+            setThermoUi(state);
+            return;
+          }
+        } catch (e) {}
+        await sleep(300);
+      }
+    }
+
+    async function sendThermoCommand(command, label, optimistic) {
+      if (!cfg.thermostatDeviceId) {
+        throw new Error("Thermostat not configured — enter device ID in ⚙");
+      }
+      if (typeof optimistic === "function") {
+        optimistic();
+      }
+      await hubCmd(cfg.thermostatDeviceId, command);
+      setMsg(label);
+      await pollThermostatAfterCommand();
+      burstRefresh();
     }
 
     async function refreshZone(deviceId, prefix) {
@@ -931,8 +1008,12 @@
     }
 
     async function refreshAll() {
-      if (!cfg.hubIp || !cfg.makerAccessToken || !cfg.mainDeviceId) {
+      if (!cfg.makerAccessToken || (!cfg.hubIp && !isHubHosted())) {
         setMsg("Configure connection (⚙)", true);
+        return;
+      }
+      if (!cfg.mainDeviceId && !cfg.thermostatDeviceId) {
+        setMsg("Configure at least one device (⚙)", true);
         return;
       }
       if (refreshInFlight) {
@@ -953,16 +1034,7 @@
             els.hdZone.style.opacity = "0.45";
             els.hdInput.textContent = "Not configured";
           }
-          if (cfg.thermostatDeviceId && appState.thermo) {
-            els.thermoZone.style.opacity = "1";
-            setThermoUi(appState.thermo);
-          } else if (cfg.thermostatDeviceId) {
-            await refreshThermostat();
-          } else {
-            els.thermoZone.style.opacity = "0.45";
-            els.thermoMeta.textContent = "Not configured";
-          }
-        } else {
+        } else if (cfg.mainDeviceId) {
           await refreshZone(cfg.mainDeviceId, "main");
           if (cfg.hdZoneDeviceId) {
             els.hdZone.style.opacity = "1";
@@ -971,18 +1043,24 @@
             els.hdZone.style.opacity = "0.45";
             els.hdInput.textContent = "Not configured";
           }
-          if (cfg.thermostatDeviceId) {
-            await refreshThermostat();
-          } else {
-            els.thermoZone.style.opacity = "0.45";
-            els.thermoMeta.textContent = "Not configured";
-          }
           if (DEBUG) {
             setMsg("Using Maker API — re-save Pioneer AVR Dashboard app (v1.1.0+)", true);
           }
         }
+        if (cfg.thermostatDeviceId) {
+          try {
+            await refreshThermostat();
+          } catch (thermoErr) {
+            setMsg(thermoErr.message, true);
+          }
+        } else {
+          els.thermoZone.style.opacity = "0.45";
+          els.thermoMeta.textContent = "Not configured";
+        }
         if (!DEBUG || appState?.main) {
-          setMsg("Updated " + new Date().toLocaleTimeString());
+          if (!els.msg.classList.contains("err")) {
+            setMsg("Updated " + new Date().toLocaleTimeString());
+          }
         }
       } catch (e) {
         setMsg(e.message, true);
@@ -1088,8 +1166,7 @@
       };
 
       const thermoCmd = (command, label, optimistic) => {
-        if (!cfg.thermostatDeviceId) return setMsg("Thermostat not configured", true);
-        runCommand(cfg.thermostatDeviceId, command, label, optimistic).catch(err);
+        sendThermoCommand(command, label, optimistic).catch(err);
       };
       document.getElementById("thermoHeatUp").onclick = () =>
         thermoCmd("heatLevelUp", "Heat +", () => optimisticThermoStep("heat", 1));
