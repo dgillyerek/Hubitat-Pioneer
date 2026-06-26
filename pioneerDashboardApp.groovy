@@ -84,7 +84,7 @@ def mainPage() {
             def hubIp = location.hubs[0]?.localIP ?: "?"
             paragraph "App: v${APP_VERSION}\n" +
                 "Dashboard: ${state.dashboardInstalled ? 'installed (v' + (state.dashboardVersion ?: '?') + ')' : 'not installed — click Done or Update'}\n" +
-                "Token file: ${state.tokenWritten ? 'written (refreshes every 2s)' : 'not written'}\n" +
+                "Token file: ${state.tokenWritten ? 'written (refreshes every 1s)' : 'not written'}\n" +
                 "Hub IP: ${hubIp}"
         }
     }
@@ -103,13 +103,13 @@ def initialize() {
     unschedule()
     downloadDashboard(false)
     writeTokenFile()
-    runIn(2, "refreshTokenLoop")
+    runIn(1, "refreshTokenLoop")
     log.info "Pioneer AVR Dashboard v${APP_VERSION} ready — app ID ${app.id}"
 }
 
 def refreshTokenLoop() {
     writeTokenFile()
-    runIn(2, "refreshTokenLoop")
+    runIn(1, "refreshTokenLoop")
 }
 
 def downloadDashboard(Boolean force) {

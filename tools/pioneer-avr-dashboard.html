@@ -314,7 +314,7 @@
   </dialog>
 
   <script>
-    const PIONEER_DASHBOARD_VERSION = "1.0.6";
+    const PIONEER_DASHBOARD_VERSION = "1.0.7";
     const STORAGE_KEY = "pioneer.avr.remote.cfg";
     const DEBUG = new URLSearchParams(location.search).has("debug");
     const NORMAL_REFRESH_MS = 8000;
@@ -352,6 +352,8 @@
     let burstPollTimer = null;
     let fastRefreshUntil = 0;
     let volumeRefreshRequested = false;
+    let volumeFreshUntil = 0;
+    let lastLocalVolume = null;
 
     function sleep(ms) {
       return new Promise((resolve) => setTimeout(resolve, ms));
@@ -402,7 +404,13 @@
       const on = state.switch === "on";
       setPowerUi(els.mainPowerPill, els.mainPower, on);
       els.mainInput.textContent = inputFromState(state);
-      setMainStatusUi(volumeFromState(state), state.mute === "muted");
+      let vol = volumeFromState(state);
+      if (Date.now() < volumeFreshUntil && lastLocalVolume) {
+        vol = lastLocalVolume;
+      } else if (vol) {
+        lastLocalVolume = vol;
+      }
+      setMainStatusUi(vol, state.mute === "muted");
       return true;
     }
 
@@ -612,6 +620,46 @@
       return volumeLabelFromMap(collectAttributes(device));
     }
 
+    async function fetchVolumeDbDirect() {
+      if (!cfg.mainDeviceId) {
+        return null;
+      }
+      const raw = await fetchMakerAttribute(cfg.mainDeviceId, "volumeDb");
+      return formatVolume(raw, false);
+    }
+
+    async function pollVolumeDbAfterCommand() {
+      volumeFreshUntil = Date.now() + 3500;
+      const deadline = Date.now() + 3000;
+      while (Date.now() < deadline) {
+        const vol = await fetchVolumeDbDirect();
+        if (vol) {
+          lastLocalVolume = vol;
+          const isMuted = document.getElementById("mainMute").textContent === "Unmute";
+          setMainStatusUi(vol, isMuted);
+          volumeFreshUntil = Date.now() + 800;
+          return;
+        }
+        await sleep(200);
+      }
+    }
+
+    function parseVolumeFromDisplay(text) {
+      const raw = String(text).trim();
+      if (raw === "—" || raw === "MIN") {
+        return null;
+      }
+      let db = parseVolumeDb(raw);
+      if (db != null) {
+        return db;
+      }
+      const pctMatch = raw.match(/^(\d+(?:\.\d+)?)\s*%$/);
+      if (pctMatch) {
+        return parseFloat(pctMatch[1]) - 80;
+      }
+      return null;
+    }
+
     function parseVolumeDb(text) {
       const m = String(text).match(/(-?\d+(?:\.\d+)?)\s*dB/i);
       return m ? parseFloat(m[1]) : null;
@@ -641,16 +689,14 @@
     }
 
     function optimisticVolumeStep(delta) {
-      const raw = els.mainVolume.textContent;
-      if (raw === "—" || raw === "MIN") {
-        return;
-      }
-      let db = parseVolumeDb(raw);
+      const db = parseVolumeFromDisplay(els.mainVolume.textContent);
       if (db == null) {
         return;
       }
-      db = Math.min(12, Math.max(-80, db + delta * 0.5));
-      const label = formatVolumeDb(db);
+      const next = Math.min(12, Math.max(-80, db + delta * 0.5));
+      const label = formatVolumeDb(next);
+      lastLocalVolume = label;
+      volumeFreshUntil = Date.now() + 3500;
       const isMuted = document.getElementById("mainMute").textContent === "Unmute";
       setMainStatusUi(label, isMuted);
     }
@@ -695,6 +741,11 @@
           if (updated) {
             vol = (await resolveVolume(deviceId, updated)) || vol;
           }
+        }
+        if (Date.now() < volumeFreshUntil && lastLocalVolume) {
+          vol = lastLocalVolume;
+        } else if (vol) {
+          lastLocalVolume = vol;
         }
         setMainStatusUi(vol, mute === "muted");
         if (DEBUG && !vol) {
@@ -789,6 +840,9 @@
       }
       await hubCmd(deviceId, command);
       setMsg(label);
+      if (command === "volumeUp" || command === "volumeDown") {
+        pollVolumeDbAfterCommand();
+      }
       burstRefresh();
     }
 

@@ -35,6 +35,7 @@
     2026-06-21      0.7.7               Derek Gilbert       Input name display sync after RGB load
     2026-06-21      0.7.8               Derek Gilbert       Match RGB response code to query index
     2026-06-21      0.7.9               Derek Gilbert       Fast single-attribute status query after commands
+    2026-06-21      0.7.12              Derek Gilbert       Fix main zone dB formula (was 2dB per step)
   
 */
 
@@ -79,7 +80,7 @@ metadata
 
 def getVersion()
 {
-    return "0.7.9"
+    return "0.7.12"
 }
 
 List getInputCycleCodes() {
@@ -213,14 +214,14 @@ void parse(String resp)
 //  81:0.0dB
 //  01:-80.0dB
 //  00:---dB(MIN)
-String TranslateVolumeLevel(Float step, Integer val){
+String TranslateVolumeLevel(Float step, Integer val, Integer zeroVal){
 
     if (val == 000 || val == 00){
         return "MIN-db"
     }
 
-    def start = -80
-    return ((val - 1)/step) + start + "dB"
+    def db = (val - zeroVal) * step
+    return String.format("%.1fdB", db)
 }
 
 String getCommand(Integer zone, String command){
@@ -464,7 +465,7 @@ def handleVolume(String resp){
     writeLogDebug("handleVolume ${resp}")
     if (resp.indexOf("VOL") == 0 && resp.length() >= 6){
         try {
-            sendChildZone(1, "volume", TranslateVolumeLevel(0.5f, resp.substring(3, 6).toInteger()))
+            sendChildZone(1, "volume", TranslateVolumeLevel(0.5f, resp.substring(3, 6).toInteger(), 161))
         } catch (e) {
             writeLogDebug("handleVolume main zone parse error: ${e.message}")
         }
@@ -474,7 +475,7 @@ def handleVolume(String resp){
         def val = resp.substring(0, 2)
         if (val == "ZV" || val == "YV"){
             try {
-                sendChildZone(val == "ZV" ? 2 : 3, "volume", TranslateVolumeLevel(1, resp.substring(2, 4).toInteger()))
+                sendChildZone(val == "ZV" ? 2 : 3, "volume", TranslateVolumeLevel(1f, resp.substring(2, 4).toInteger(), 81))
             } catch (e) {
                 writeLogDebug("handleVolume zone 2/3 parse error: ${e.message}")
             }
