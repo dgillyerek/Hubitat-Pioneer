@@ -28,7 +28,7 @@ preferences {
     page(name: "mainPage")
 }
 
-@Field static final String APP_VERSION         = "1.1.0"
+@Field static final String APP_VERSION         = "1.2.0"
 @Field static final String DASHBOARD_FILENAME  = "pioneer-avr-dashboard.html"
 @Field static final String TOKEN_FILENAME      = "pioneer-avr-token.json"
 @Field static final String DEFAULT_DASHBOARD_URL = "https://raw.githubusercontent.com/dgillyerek/Hubitat-Pioneer/main/tools/pioneer-avr-dashboard.html"
@@ -66,6 +66,8 @@ def mainPage() {
                 description: "Pioneer AVR Main child device"
             input name: "hdZoneDevice", type: "device", title: "HD Zone device (optional)", required: false,
                 description: "Pioneer AVR Zone 4 child device"
+            input name: "thermostatDevice", type: "device", title: "Honeywell TCC thermostat (optional)", required: false,
+                description: "Honeywell Total Comfort thermostat device"
         }
 
         section("Maker API") {
@@ -154,8 +156,10 @@ def writeTokenFile() {
             makerAccessToken:   settings.makerAccessToken.toString(),
             mainDeviceId:       mainId,
             hdZoneDeviceId:     resolveDeviceId(settings?.hdZoneDevice) ?: "",
+            thermostatDeviceId: resolveDeviceId(settings?.thermostatDevice) ?: "",
             mainState:          buildZoneState(settings?.mainZoneDevice),
             hdState:            buildZoneState(settings?.hdZoneDevice),
+            thermostatState:    buildThermostatState(settings?.thermostatDevice),
             dashboardVersion:   state.dashboardVersion ?: APP_VERSION,
             appVersion:         APP_VERSION
         ]
@@ -188,13 +192,34 @@ def getToken() {
         makerAccessToken:   settings?.makerAccessToken?.toString() ?: "",
         mainDeviceId:       resolveDeviceId(settings?.mainZoneDevice) ?: "",
         hdZoneDeviceId:     resolveDeviceId(settings?.hdZoneDevice) ?: "",
+        thermostatDeviceId: resolveDeviceId(settings?.thermostatDevice) ?: "",
         mainState:          buildZoneState(settings?.mainZoneDevice),
         hdState:            buildZoneState(settings?.hdZoneDevice),
+        thermostatState:    buildThermostatState(settings?.thermostatDevice),
         dashboardVersion:   state.dashboardVersion ?: APP_VERSION,
         appVersion:         APP_VERSION
     ]
     render contentType: "application/json", headers: CORS_HEADERS,
            data: new groovy.json.JsonBuilder(payload).toString()
+}
+
+private Map buildThermostatState(deviceRef) {
+    if (!deviceRef) {
+        return null
+    }
+    try {
+        return [
+            temperature:              deviceRef.currentValue("temperature"),
+            heatingSetpoint:          deviceRef.currentValue("heatingSetpoint"),
+            coolingSetpoint:          deviceRef.currentValue("coolingSetpoint"),
+            thermostatFanMode:        deviceRef.currentValue("thermostatFanMode"),
+            thermostatOperatingState: deviceRef.currentValue("thermostatOperatingState"),
+            thermostatMode:           deviceRef.currentValue("thermostatMode")
+        ]
+    } catch (e) {
+        log.warn "Pioneer dashboard buildThermostatState failed: ${e.message}"
+        return null
+    }
 }
 
 private Map buildZoneState(deviceRef) {
