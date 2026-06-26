@@ -175,6 +175,22 @@
       color: var(--muted);
       margin-bottom: -4px;
     }
+    .vol-readout {
+      min-width: 84px;
+      text-align: center;
+      font-size: 1.05rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: 0.02em;
+      color: var(--text);
+      padding: 10px 8px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--line);
+    }
+    .vol-readout.muted {
+      opacity: 0.45;
+    }
     .footer {
       margin-top: 14px;
       text-align: center;
@@ -241,6 +257,7 @@
             <button class="btn" id="mainVolDown" type="button" aria-label="Volume down">
               <svg viewBox="0 0 24 24"><path d="M5 12h14v2H5z"/></svg>
             </button>
+            <div class="vol-readout" id="mainVolume" aria-live="polite">—</div>
             <button class="btn accent" id="mainVolUp" type="button" aria-label="Volume up">
               <svg viewBox="0 0 24 24"><path d="M11 5h2v14h-2zm7 0h2v14h-2z"/></svg>
             </button>
@@ -297,7 +314,7 @@
   </dialog>
 
   <script>
-    const PIONEER_DASHBOARD_VERSION = "1.0.2";
+    const PIONEER_DASHBOARD_VERSION = "1.0.3";
     const STORAGE_KEY = "pioneer.avr.remote.cfg";
     const NORMAL_REFRESH_MS = 8000;
     const FAST_REFRESH_MS = 500;
@@ -322,6 +339,7 @@
       hdInput: document.getElementById("hdInput"),
       mainMeta: document.getElementById("mainMeta"),
       hdMeta: document.getElementById("hdMeta"),
+      mainVolume: document.getElementById("mainVolume"),
       mainPower: document.getElementById("mainPower"),
       hdPower: document.getElementById("hdPower"),
       hdZone: document.getElementById("hdZone"),
@@ -332,6 +350,7 @@
     let refreshPending = false;
     let burstPollTimer = null;
     let fastRefreshUntil = 0;
+    let volumeRefreshRequested = false;
 
     function sleep(ms) {
       return new Promise((resolve) => setTimeout(resolve, ms));
@@ -394,16 +413,95 @@
       btn.className = "btn power " + (isOn ? "on" : "off-state");
     }
 
-    function setMainMuteUi(vol, isMuted) {
-      els.mainMeta.textContent = `Volume ${vol} · ${isMuted ? "Muted" : "Unmuted"}`;
+    function formatVolume(raw) {
+      if (raw == null || raw === "") {
+        return null;
+      }
+      const s = String(raw).trim();
+      if (!s || s === "null") {
+        return null;
+      }
+      if (/min/i.test(s)) {
+        return "MIN";
+      }
+      const dbMatch = s.match(/^(-?\d+(?:\.\d+)?)\s*dB$/i);
+      if (dbMatch) {
+        return `${dbMatch[1]} dB`;
+      }
+      return s;
+    }
+
+    function volumeLabel(device) {
+      const custom = formatVolume(attr(device, "volume"));
+      if (custom) {
+        return custom;
+      }
+      const level = attr(device, "level");
+      if (level != null && level !== "") {
+        return `${level}%`;
+      }
+      return null;
+    }
+
+    function parseVolumeDb(text) {
+      const m = String(text).match(/(-?\d+(?:\.\d+)?)\s*dB/i);
+      return m ? parseFloat(m[1]) : null;
+    }
+
+    function formatVolumeDb(db) {
+      if (db <= -80) {
+        return "MIN";
+      }
+      return `${db.toFixed(1)} dB`;
+    }
+
+    function setMainStatusUi(vol, isMuted) {
+      const volText = vol || "—";
+      els.mainVolume.textContent = volText;
+      els.mainVolume.className = "vol-readout" + (isMuted ? " muted" : "");
+      els.mainMeta.textContent = `Volume ${volText} · ${isMuted ? "Muted" : "Unmuted"}`;
       document.getElementById("mainMute").textContent = isMuted ? "Unmute" : "Mute";
     }
 
     function optimisticMuteToggle() {
       const muteBtn = document.getElementById("mainMute");
-      const volMatch = els.mainMeta.textContent.match(/^Volume ([^·]+)/);
-      const vol = volMatch ? volMatch[1].trim() : "—";
-      setMainMuteUi(vol, muteBtn.textContent !== "Unmute");
+      const vol = els.mainVolume.textContent.trim() || "—";
+      setMainStatusUi(vol, muteBtn.textContent !== "Unmute");
+    }
+
+    function optimisticVolumeStep(delta) {
+      const raw = els.mainVolume.textContent;
+      if (raw === "—" || raw === "MIN") {
+        return;
+      }
+      let db = parseVolumeDb(raw);
+      if (db == null) {
+        return;
+      }
+      db = Math.min(12, Math.max(-80, db + delta * 0.5));
+      const label = formatVolumeDb(db);
+      const isMuted = document.getElementById("mainMute").textContent === "Unmute";
+      setMainStatusUi(label, isMuted);
+    }
+
+    async function ensureVolumeKnown(deviceId, device) {
+      if (volumeRefreshRequested || !deviceId) {
+        return null;
+      }
+      if (volumeLabel(device)) {
+        return null;
+      }
+      if (attr(device, "switch") !== "on") {
+        return null;
+      }
+      volumeRefreshRequested = true;
+      try {
+        await hubCmd(deviceId, "refresh");
+        await sleep(1500);
+        return await hubGet(deviceId);
+      } catch (e) {
+        return null;
+      }
     }
 
     function inputLabel(device) {
@@ -417,9 +515,17 @@
       setPowerUi(els[prefix + "PowerPill"], document.getElementById(prefix + "Power"), on);
       document.getElementById(prefix + "Input").textContent = inputLabel(d);
       if (prefix === "main") {
-        const vol = attr(d, "volume") || "—";
+        let vol = volumeLabel(d);
         const mute = attr(d, "mute") || "—";
-        setMainMuteUi(vol, mute === "muted");
+        if (!on) {
+          volumeRefreshRequested = false;
+        } else if (!vol) {
+          const updated = await ensureVolumeKnown(deviceId, d);
+          if (updated) {
+            vol = volumeLabel(updated) || vol;
+          }
+        }
+        setMainStatusUi(vol, mute === "muted");
       }
     }
 
@@ -526,9 +632,9 @@
       document.getElementById("mainInPrev").onclick = () =>
         runCommand(cfg.mainDeviceId, "inputPrevious", "Main input −").catch(err);
       document.getElementById("mainVolUp").onclick = () =>
-        runCommand(cfg.mainDeviceId, "volumeUp", "Volume +").catch(err);
+        runCommand(cfg.mainDeviceId, "volumeUp", "Volume +", () => optimisticVolumeStep(1)).catch(err);
       document.getElementById("mainVolDown").onclick = () =>
-        runCommand(cfg.mainDeviceId, "volumeDown", "Volume −").catch(err);
+        runCommand(cfg.mainDeviceId, "volumeDown", "Volume −", () => optimisticVolumeStep(-1)).catch(err);
       document.getElementById("mainMute").onclick = () =>
         runCommand(cfg.mainDeviceId, "muteToggle", "Mute toggled", optimisticMuteToggle).catch(err);
       document.getElementById("mainPower").onclick = () =>
