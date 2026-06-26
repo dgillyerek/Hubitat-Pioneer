@@ -314,8 +314,9 @@
   </dialog>
 
   <script>
-    const PIONEER_DASHBOARD_VERSION = "1.0.3";
+    const PIONEER_DASHBOARD_VERSION = "1.0.6";
     const STORAGE_KEY = "pioneer.avr.remote.cfg";
+    const DEBUG = new URLSearchParams(location.search).has("debug");
     const NORMAL_REFRESH_MS = 8000;
     const FAST_REFRESH_MS = 500;
     const FAST_REFRESH_DURATION_MS = 15000;
@@ -367,6 +368,54 @@
       localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
     }
 
+    async function fetchLiveState() {
+      try {
+        const res = await fetch("./pioneer-avr-token.json?ts=" + Date.now());
+        if (!res.ok) {
+          return null;
+        }
+        const t = await res.json();
+        return { main: t.mainState, hd: t.hdState };
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function volumeFromState(state) {
+      if (!state) {
+        return null;
+      }
+      return formatVolume(state.volumeDb, false) || formatVolume(state.volume, true);
+    }
+
+    function inputFromState(state) {
+      if (!state) {
+        return "—";
+      }
+      return state.mediaInputSource || state.input || "—";
+    }
+
+    function applyMainZoneState(state) {
+      if (!state) {
+        return false;
+      }
+      const on = state.switch === "on";
+      setPowerUi(els.mainPowerPill, els.mainPower, on);
+      els.mainInput.textContent = inputFromState(state);
+      setMainStatusUi(volumeFromState(state), state.mute === "muted");
+      return true;
+    }
+
+    function applyHdZoneState(state) {
+      if (!state) {
+        return false;
+      }
+      const on = state.switch === "on";
+      setPowerUi(els.hdPowerPill, els.hdPower, on);
+      els.hdInput.textContent = inputFromState(state);
+      return true;
+    }
+
     function apiBase() {
       return `http://${cfg.hubIp}/apps/api/${cfg.makerAppId}`;
     }
@@ -386,13 +435,114 @@
     }
 
     function attr(device, name) {
-      const a = device?.attributes;
-      if (!a) return null;
-      if (Array.isArray(a)) {
-        const row = a.find((x) => x.name === name);
-        return row?.currentValue ?? row?.value ?? null;
+      const attrs = collectAttributes(device);
+      return attrs[String(name).toLowerCase()] ?? null;
+    }
+
+    function collectAttributes(device) {
+      const out = {};
+      if (!device) {
+        return out;
       }
-      return a[name]?.currentValue ?? a[name] ?? null;
+      const merge = (name, val) => {
+        if (name == null || val == null || val === "") {
+          return;
+        }
+        out[String(name).toLowerCase()] = val;
+      };
+
+      const a = device.attributes;
+      if (Array.isArray(a)) {
+        a.forEach((row) => merge(row.name, row.currentValue ?? row.value));
+      } else if (a && typeof a === "object") {
+        Object.entries(a).forEach(([k, v]) => merge(k, v?.currentValue ?? v));
+      }
+
+      const caps = device.capabilities;
+      if (Array.isArray(caps)) {
+        caps.forEach((cap) => {
+          if (cap && typeof cap === "object" && Array.isArray(cap.attributes)) {
+            cap.attributes.forEach((row) => merge(row.name, row.currentValue ?? row.value));
+          }
+        });
+      }
+
+      ["volumedb", "volume", "level", "mute", "switch", "input", "mediainputsource"].forEach((key) => {
+        if (device[key] != null && out[key] == null) {
+          merge(key, device[key]);
+        }
+      });
+
+      return out;
+    }
+
+    function attributeUrl(deviceId, attributeName) {
+      const q = `access_token=${encodeURIComponent(cfg.makerAccessToken)}`;
+      return `${apiBase()}/devices/${deviceId}/attribute/${attributeName}?${q}`;
+    }
+
+    function eventsUrl(deviceId) {
+      const q = `access_token=${encodeURIComponent(cfg.makerAccessToken)}`;
+      return `${apiBase()}/devices/${deviceId}/events?${q}`;
+    }
+
+    async function fetchMakerAttribute(deviceId, attributeName) {
+      try {
+        const res = await fetch(attributeUrl(deviceId, attributeName));
+        if (!res.ok) {
+          return null;
+        }
+        const data = await res.json();
+        if (typeof data === "string" || typeof data === "number") {
+          return data;
+        }
+        if (Array.isArray(data)) {
+          const row = data.find((x) => String(x?.name || "").toLowerCase() === attributeName.toLowerCase());
+          return row?.currentValue ?? row?.value ?? null;
+        }
+        const attrs = collectAttributes(data);
+        return attrs[attributeName.toLowerCase()] ?? data?.currentValue ?? data?.value ?? null;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    async function fetchVolumeFromEvents(deviceId) {
+      try {
+        const res = await fetch(eventsUrl(deviceId));
+        if (!res.ok) {
+          return null;
+        }
+        const data = await res.json();
+        const events = Array.isArray(data) ? data : data?.events ?? [];
+        for (const ev of events) {
+          const name = String(ev.name || ev.attribute || "").toLowerCase();
+          if (name === "volumedb" || name === "volume" || name === "level") {
+            const label = formatVolume(ev.value ?? ev.currentValue, name === "volume" || name === "level");
+            if (label) {
+              return label;
+            }
+          }
+        }
+      } catch (e) {
+        return null;
+      }
+      return null;
+    }
+
+    async function resolveVolume(deviceId, device) {
+      let vol = volumeLabelFromMap(collectAttributes(device));
+      if (vol) {
+        return vol;
+      }
+      for (const name of ["volumeDb", "volume", "level"]) {
+        const raw = await fetchMakerAttribute(deviceId, name);
+        const label = formatVolume(raw, name === "volume" || name === "level");
+        if (label) {
+          return label;
+        }
+      }
+      return fetchVolumeFromEvents(deviceId);
     }
 
     async function hubCmd(deviceId, command) {
@@ -413,9 +563,12 @@
       btn.className = "btn power " + (isOn ? "on" : "off-state");
     }
 
-    function formatVolume(raw) {
+    function formatVolume(raw, isLevelPercent) {
       if (raw == null || raw === "") {
         return null;
+      }
+      if (isLevelPercent) {
+        return `${raw}%`;
       }
       const s = String(raw).trim();
       if (!s || s === "null") {
@@ -424,23 +577,39 @@
       if (/min/i.test(s)) {
         return "MIN";
       }
-      const dbMatch = s.match(/^(-?\d+(?:\.\d+)?)\s*dB$/i);
+      const dbMatch = s.match(/^([+-]?\d+(?:\.\d+)?)\s*dB?$/i);
       if (dbMatch) {
         return `${dbMatch[1]} dB`;
+      }
+      if (/^[+-]?\d+(?:\.\d+)?$/.test(s)) {
+        return `${s} dB`;
       }
       return s;
     }
 
-    function volumeLabel(device) {
-      const custom = formatVolume(attr(device, "volume"));
-      if (custom) {
-        return custom;
+    function volumeLabelFromMap(attrs) {
+      const preferred = ["volumedb", "volume", "level", "volumelevel", "soundvolume"];
+      for (const key of preferred) {
+        if (attrs[key] != null && attrs[key] !== "") {
+          const label = formatVolume(attrs[key], key === "volume" || key === "level");
+          if (label) {
+            return label;
+          }
+        }
       }
-      const level = attr(device, "level");
-      if (level != null && level !== "") {
-        return `${level}%`;
+      for (const [key, val] of Object.entries(attrs)) {
+        if (/vol/i.test(key) && val != null && val !== "") {
+          const label = formatVolume(val, key === "volume" || key === "level");
+          if (label) {
+            return label;
+          }
+        }
       }
       return null;
+    }
+
+    function volumeLabel(device) {
+      return volumeLabelFromMap(collectAttributes(device));
     }
 
     function parseVolumeDb(text) {
@@ -457,8 +626,10 @@
 
     function setMainStatusUi(vol, isMuted) {
       const volText = vol || "—";
-      els.mainVolume.textContent = volText;
-      els.mainVolume.className = "vol-readout" + (isMuted ? " muted" : "");
+      if (els.mainVolume) {
+        els.mainVolume.textContent = volText;
+        els.mainVolume.className = "vol-readout" + (isMuted ? " muted" : "");
+      }
       els.mainMeta.textContent = `Volume ${volText} · ${isMuted ? "Muted" : "Unmuted"}`;
       document.getElementById("mainMute").textContent = isMuted ? "Unmute" : "Mute";
     }
@@ -515,17 +686,20 @@
       setPowerUi(els[prefix + "PowerPill"], document.getElementById(prefix + "Power"), on);
       document.getElementById(prefix + "Input").textContent = inputLabel(d);
       if (prefix === "main") {
-        let vol = volumeLabel(d);
+        let vol = await resolveVolume(deviceId, d);
         const mute = attr(d, "mute") || "—";
         if (!on) {
           volumeRefreshRequested = false;
         } else if (!vol) {
           const updated = await ensureVolumeKnown(deviceId, d);
           if (updated) {
-            vol = volumeLabel(updated) || vol;
+            vol = (await resolveVolume(deviceId, updated)) || vol;
           }
         }
         setMainStatusUi(vol, mute === "muted");
+        if (DEBUG && !vol) {
+          setMsg("No volume in API. Attrs: " + Object.keys(collectAttributes(d)).sort().join(", "), true);
+        }
       }
     }
 
@@ -540,15 +714,34 @@
       }
       refreshInFlight = true;
       try {
-        await refreshZone(cfg.mainDeviceId, "main");
-        if (cfg.hdZoneDeviceId) {
-          els.hdZone.style.opacity = "1";
-          await refreshZone(cfg.hdZoneDeviceId, "hd");
+        const appState = await fetchLiveState();
+        if (appState?.main) {
+          applyMainZoneState(appState.main);
+          if (cfg.hdZoneDeviceId && appState.hd) {
+            els.hdZone.style.opacity = "1";
+            applyHdZoneState(appState.hd);
+          } else if (cfg.hdZoneDeviceId) {
+            await refreshZone(cfg.hdZoneDeviceId, "hd");
+          } else {
+            els.hdZone.style.opacity = "0.45";
+            els.hdInput.textContent = "Not configured";
+          }
         } else {
-          els.hdZone.style.opacity = "0.45";
-          els.hdInput.textContent = "Not configured";
+          await refreshZone(cfg.mainDeviceId, "main");
+          if (cfg.hdZoneDeviceId) {
+            els.hdZone.style.opacity = "1";
+            await refreshZone(cfg.hdZoneDeviceId, "hd");
+          } else {
+            els.hdZone.style.opacity = "0.45";
+            els.hdInput.textContent = "Not configured";
+          }
+          if (DEBUG) {
+            setMsg("Using Maker API — re-save Pioneer AVR Dashboard app (v1.1.0+)", true);
+          }
         }
-        setMsg("Updated " + new Date().toLocaleTimeString());
+        if (!DEBUG || appState?.main) {
+          setMsg("Updated " + new Date().toLocaleTimeString());
+        }
       } catch (e) {
         setMsg(e.message, true);
       } finally {

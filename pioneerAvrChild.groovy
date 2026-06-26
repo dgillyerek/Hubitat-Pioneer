@@ -35,6 +35,8 @@
     2026-06-21      0.7.7               Derek Gilbert       updateInputDisplay for custom names
     2026-06-21      0.7.8               Derek Gilbert       RGB response code validation
     2026-06-21      0.7.9               Derek Gilbert       Optimistic mute, fast status query after commands
+    2026-06-21      0.7.10              Derek Gilbert       Mirror volume dB to AudioVolume level attribute
+    2026-06-21      0.7.11              Derek Gilbert       volumeDb attribute for Maker API (volume is NUMBER)
   
 */
 
@@ -53,7 +55,7 @@ metadata
 
 		attribute "input", "string"
 		attribute "mute", "string"
-		attribute "volume", "string"
+		attribute "volumeDb", "string"
 		attribute "numberOfButtons", "number"
 
         command "muteToggle"
@@ -74,7 +76,7 @@ metadata
 
 def getVersion()
 {
-    return "0.7.9"
+    return "0.7.11"
 }
 
 void parse(String description) 
@@ -126,6 +128,7 @@ void refresh()
 {
     writeLogInfo("${getFullDeviceName()} refresh")
     unschedule("refreshNextAttribute")
+    publishLevelFromCurrentVolume()
     parent.requestZoneRefresh(getCurrentZone())
 }
 
@@ -358,10 +361,51 @@ def fromA(String command, String value) {
     writeLogDebug("handleReceiverResponse ${command} ${value}")
 
     if(command == "volume"){
-        writeLogInfo("${getFullDeviceName()} volume is ${value}")
-        sendEvent(name: "volume", value: value)
+        publishVolume(value)
     } else if (command == "input") {
         applyInputDisplay(value)
+    }
+}
+
+private void publishVolume(String dbValue) {
+    writeLogInfo("${getFullDeviceName()} volume is ${dbValue}")
+    sendEvent(name: "volumeDb", value: dbValue)
+    def pct = volumeDbToLevel(dbValue)
+    if (pct != null) {
+        sendEvent(name: "volume", value: pct)
+    }
+}
+
+private Integer volumeDbToLevel(String dbValue) {
+    if (!dbValue) {
+        return null
+    }
+    if (dbValue.toUpperCase().contains("MIN")) {
+        return 0
+    }
+    def m = (dbValue =~ /(-?\d+(?:\.\d+)?)/)
+    if (m.find()) {
+        def db = m.group(1) as BigDecimal
+        return Math.round(Math.min(100, Math.max(0, db + 80)))
+    }
+    return null
+}
+
+private void publishLevelFromCurrentVolume() {
+    def db = device.currentValue("volumeDb")?.toString()
+    if (!db) {
+        def legacy = device.currentValue("volume")?.toString()
+        if (legacy && legacy.toUpperCase().contains("DB")) {
+            db = legacy
+            sendEvent(name: "volumeDb", value: db)
+        }
+    }
+    if (!db) {
+        return
+    }
+    def pct = volumeDbToLevel(db)
+    if (pct != null) {
+        sendEvent(name: "volume", value: pct)
     }
 }
 

@@ -28,7 +28,7 @@ preferences {
     page(name: "mainPage")
 }
 
-@Field static final String APP_VERSION         = "1.0.0"
+@Field static final String APP_VERSION         = "1.1.0"
 @Field static final String DASHBOARD_FILENAME  = "pioneer-avr-dashboard.html"
 @Field static final String TOKEN_FILENAME      = "pioneer-avr-token.json"
 @Field static final String DEFAULT_DASHBOARD_URL = "https://raw.githubusercontent.com/dgillyerek/Hubitat-Pioneer/main/tools/pioneer-avr-dashboard.html"
@@ -84,7 +84,7 @@ def mainPage() {
             def hubIp = location.hubs[0]?.localIP ?: "?"
             paragraph "App: v${APP_VERSION}\n" +
                 "Dashboard: ${state.dashboardInstalled ? 'installed (v' + (state.dashboardVersion ?: '?') + ')' : 'not installed — click Done or Update'}\n" +
-                "Token file: ${state.tokenWritten ? 'written' : 'not written'}\n" +
+                "Token file: ${state.tokenWritten ? 'written (refreshes every 2s)' : 'not written'}\n" +
                 "Hub IP: ${hubIp}"
         }
     }
@@ -103,7 +103,13 @@ def initialize() {
     unschedule()
     downloadDashboard(false)
     writeTokenFile()
+    runIn(2, "refreshTokenLoop")
     log.info "Pioneer AVR Dashboard v${APP_VERSION} ready — app ID ${app.id}"
+}
+
+def refreshTokenLoop() {
+    writeTokenFile()
+    runIn(2, "refreshTokenLoop")
 }
 
 def downloadDashboard(Boolean force) {
@@ -148,6 +154,8 @@ def writeTokenFile() {
             makerAccessToken:   settings.makerAccessToken.toString(),
             mainDeviceId:       mainId,
             hdZoneDeviceId:     resolveDeviceId(settings?.hdZoneDevice) ?: "",
+            mainState:          buildZoneState(settings?.mainZoneDevice),
+            hdState:            buildZoneState(settings?.hdZoneDevice),
             dashboardVersion:   state.dashboardVersion ?: APP_VERSION,
             appVersion:         APP_VERSION
         ]
@@ -180,11 +188,32 @@ def getToken() {
         makerAccessToken:   settings?.makerAccessToken?.toString() ?: "",
         mainDeviceId:       resolveDeviceId(settings?.mainZoneDevice) ?: "",
         hdZoneDeviceId:     resolveDeviceId(settings?.hdZoneDevice) ?: "",
+        mainState:          buildZoneState(settings?.mainZoneDevice),
+        hdState:            buildZoneState(settings?.hdZoneDevice),
         dashboardVersion:   state.dashboardVersion ?: APP_VERSION,
         appVersion:         APP_VERSION
     ]
     render contentType: "application/json", headers: CORS_HEADERS,
            data: new groovy.json.JsonBuilder(payload).toString()
+}
+
+private Map buildZoneState(deviceRef) {
+    if (!deviceRef) {
+        return null
+    }
+    try {
+        return [
+            switch:           deviceRef.currentValue("switch"),
+            volumeDb:         deviceRef.currentValue("volumeDb"),
+            volume:           deviceRef.currentValue("volume"),
+            mute:             deviceRef.currentValue("mute"),
+            input:            deviceRef.currentValue("input"),
+            mediaInputSource: deviceRef.currentValue("mediaInputSource")
+        ]
+    } catch (e) {
+        log.warn "Pioneer dashboard buildZoneState failed: ${e.message}"
+        return null
+    }
 }
 
 def getVersion() {
