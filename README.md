@@ -31,6 +31,32 @@ Wall/tablet remote with Main + HD Zone controls (power, input ±, volume ±, mut
 
 Settings are also written to `/local/pioneer-avr-token.json` for automatic configuration.
 
+## Widget Dashboard (flexible layout builder)
+
+Drag-and-drop dashboard with customizable widgets. Layout is saved in the Hubitat app and synced to `/local/widget-dashboard-config.json`.
+
+| File | Purpose |
+|------|---------|
+| `widgetDashboardApp.groovy` | Hubitat app — Maker API creds, config storage, serves HTML |
+| `tools/widget-dashboard.html` | Widget UI (served from hub at `/local/widget-dashboard.html`) |
+
+### Setup
+
+1. Paste **`widgetDashboardApp.groovy`** into **Apps Code** → Save  
+2. **Apps → Add User App → Widget Dashboard**  
+3. Enter **Maker API App ID** and **Access Token** (Settings → Maker API; include devices you want on the dashboard)  
+4. Click **Done**, then **Download / update dashboard file**  
+5. Open **`http://[hub-ip]/local/widget-dashboard.html`** on your LAN  
+6. Click **Edit layout** → **Add** a **Switches** widget → configure devices → **Save to Hub**
+
+### Widget templates (v1)
+
+| Template | Description |
+|----------|-------------|
+| **Switches** | Table of device names with a colored status light (green = on, gray = off). Tap the light to toggle. |
+
+More widget types can be added later (buttons, text labels, etc.).
+
 ## Other tools
 
 | File | Purpose |

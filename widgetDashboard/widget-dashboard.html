@@ -1,0 +1,911 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="theme-color" content="#0a0c10" />
+  <title>Widget Dashboard</title>
+  <style>
+    :root {
+      --bg: #0a0c10;
+      --panel: #141820;
+      --panel2: #1c2230;
+      --line: #2a3348;
+      --text: #eef2f8;
+      --muted: #8b97ad;
+      --accent: #3a96ff;
+      --accent-dim: #1e4a80;
+      --on: #2ecc71;
+      --off: #555d6e;
+      --danger: #e74c3c;
+      --edit: #f39c12;
+      --radius: 14px;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: radial-gradient(ellipse at top, #151b28 0%, var(--bg) 55%);
+      color: var(--text);
+      overflow: hidden;
+    }
+    .app {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      min-height: 100%;
+    }
+    header {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: max(10px, env(safe-area-inset-top)) 14px 10px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(10, 12, 16, 0.92);
+      backdrop-filter: blur(8px);
+      z-index: 100;
+    }
+    header h1 { margin: 0; font-size: 1.05rem; font-weight: 700; letter-spacing: 0.03em; }
+    header p { margin: 2px 0 0; font-size: 0.72rem; color: var(--muted); }
+    .header-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+    .btn-sm {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+      color: var(--text);
+      font-size: 0.78rem;
+      font-weight: 600;
+      padding: 8px 12px;
+      cursor: pointer;
+    }
+    .btn-sm.primary { background: var(--accent-dim); border-color: var(--accent); color: #fff; }
+    .btn-sm.active { background: rgba(243, 156, 18, 0.18); border-color: var(--edit); color: var(--edit); }
+    .btn-sm:disabled { opacity: 0.4; cursor: not-allowed; }
+    .icon-btn {
+      width: 38px; height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+      color: var(--muted);
+      font-size: 1rem;
+      cursor: pointer;
+    }
+    .toolbar {
+      display: none;
+      flex: 0 0 auto;
+      gap: 8px;
+      padding: 8px 14px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(243, 156, 18, 0.08);
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    body.edit-mode .toolbar { display: flex; }
+    .toolbar label { font-size: 0.75rem; color: var(--muted); }
+    .toolbar select {
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 6px 8px;
+      font-size: 0.78rem;
+    }
+    .canvas-wrap {
+      flex: 1 1 auto;
+      overflow: auto;
+      position: relative;
+      padding: 14px;
+      padding-bottom: max(14px, env(safe-area-inset-bottom));
+    }
+    .canvas {
+      position: relative;
+      min-width: 100%;
+      min-height: calc(100vh - 120px);
+    }
+    .empty-state {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      text-align: center;
+      padding: 24px;
+      pointer-events: none;
+    }
+    body.edit-mode .empty-state { pointer-events: auto; }
+    .widget {
+      position: absolute;
+      background: linear-gradient(180deg, var(--panel2) 0%, var(--panel) 100%);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: 0 8px 28px rgba(0,0,0,0.35);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      min-width: 180px;
+      min-height: 120px;
+    }
+    body.edit-mode .widget {
+      border-color: rgba(58, 150, 255, 0.45);
+      cursor: default;
+    }
+    .widget-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(0,0,0,0.15);
+    }
+    body.edit-mode .widget-head { cursor: move; touch-action: none; }
+    .widget-title {
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .widget-actions { display: flex; gap: 4px; }
+    .widget-actions button {
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 0.85rem;
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
+    .widget-actions button:hover { background: rgba(255,255,255,0.06); color: var(--text); }
+    .widget-body { flex: 1; overflow: auto; padding: 8px; }
+    .resize-handle {
+      display: none;
+      position: absolute;
+      right: 0; bottom: 0;
+      width: 18px; height: 18px;
+      cursor: nwse-resize;
+      touch-action: none;
+    }
+    body.edit-mode .resize-handle { display: block; }
+    .resize-handle::after {
+      content: "";
+      position: absolute;
+      right: 4px; bottom: 4px;
+      width: 10px; height: 10px;
+      border-right: 2px solid var(--muted);
+      border-bottom: 2px solid var(--muted);
+      opacity: 0.7;
+    }
+    .switch-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    .switch-table th {
+      text-align: left;
+      font-size: 0.68rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--muted);
+      padding: 6px 8px;
+      border-bottom: 1px solid var(--line);
+    }
+    .switch-table td { padding: 8px; border-bottom: 1px solid rgba(42,51,72,0.5); }
+    .switch-table tr:last-child td { border-bottom: none; }
+    .switch-name { font-weight: 600; }
+    .status-light {
+      width: 28px; height: 28px;
+      border-radius: 50%;
+      border: 2px solid rgba(255,255,255,0.08);
+      background: var(--off);
+      cursor: pointer;
+      transition: background 0.15s, box-shadow 0.15s;
+      margin: 0 auto;
+      display: block;
+    }
+    body.edit-mode .status-light { cursor: not-allowed; opacity: 0.55; }
+    .status-light.on {
+      background: var(--on);
+      box-shadow: 0 0 12px rgba(46,204,113,0.45);
+    }
+    .status-light.pending { opacity: 0.5; }
+    .widget-empty { color: var(--muted); font-size: 0.82rem; text-align: center; padding: 16px 8px; }
+    footer {
+      flex: 0 0 auto;
+      padding: 6px 14px max(8px, env(safe-area-inset-bottom));
+      font-size: 0.72rem;
+      color: var(--muted);
+      border-top: 1px solid var(--line);
+      background: rgba(10,12,16,0.9);
+    }
+    footer.err { color: var(--danger); }
+    dialog {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--panel);
+      color: var(--text);
+      padding: 0;
+      max-width: 520px;
+      width: calc(100% - 24px);
+    }
+    dialog::backdrop { background: rgba(0,0,0,0.65); }
+    .dialog-inner { padding: 18px; }
+    .dialog-inner h2 { margin: 0 0 12px; font-size: 1rem; }
+    .field { margin-bottom: 12px; }
+    .field label { display: block; font-size: 0.75rem; color: var(--muted); margin-bottom: 4px; }
+    .field input, .field select, .field textarea {
+      width: 100%;
+      background: var(--panel2);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      color: var(--text);
+      padding: 10px 12px;
+      font-size: 0.9rem;
+    }
+    .field textarea { min-height: 80px; resize: vertical; font-family: inherit; }
+    .device-list {
+      max-height: 220px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel2);
+    }
+    .device-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border-bottom: 1px solid rgba(42,51,72,0.5);
+      font-size: 0.85rem;
+    }
+    .device-row:last-child { border-bottom: none; }
+    .dialog-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div>
+        <h1>Widget Dashboard</h1>
+        <p id="hubLabel">Loading…</p>
+      </div>
+      <div class="header-actions">
+        <button type="button" class="btn-sm" id="editToggle">Edit layout</button>
+        <button type="button" class="btn-sm primary" id="saveBtn" hidden>Save to Hub</button>
+        <button type="button" class="icon-btn" id="settingsBtn" title="Settings">⚙</button>
+      </div>
+    </header>
+
+    <div class="toolbar">
+      <label for="addTemplate">Add widget:</label>
+      <select id="addTemplate">
+        <option value="switches">Switches (table)</option>
+      </select>
+      <button type="button" class="btn-sm primary" id="addWidgetBtn">Add</button>
+      <span style="flex:1"></span>
+      <button type="button" class="btn-sm" id="refreshDevicesBtn">Refresh devices</button>
+    </div>
+
+    <div class="canvas-wrap">
+      <div class="canvas" id="canvas">
+        <div class="empty-state" id="emptyState">
+          <p>No widgets yet.</p>
+          <p>Click <strong>Edit layout</strong>, then add a widget.</p>
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer" id="msg">Ready</footer>
+  </div>
+
+  <dialog id="settingsDialog">
+    <div class="dialog-inner">
+      <h2>Connection</h2>
+      <div class="field">
+        <label for="cfgHubIp">Hub IP</label>
+        <input id="cfgHubIp" type="text" placeholder="192.168.1.100" />
+      </div>
+      <div class="field">
+        <label for="cfgAppId">Maker API App ID</label>
+        <input id="cfgAppId" type="text" placeholder="1" />
+      </div>
+      <div class="field">
+        <label for="cfgToken">Maker API Access Token</label>
+        <input id="cfgToken" type="password" autocomplete="off" />
+      </div>
+      <div class="field">
+        <label for="cfgInstallId">Widget Dashboard App Install ID</label>
+        <input id="cfgInstallId" type="text" placeholder="From Hubitat app status page" />
+      </div>
+      <div class="dialog-actions">
+        <button type="button" class="btn-sm" id="cfgCancel">Cancel</button>
+        <button type="button" class="btn-sm primary" id="cfgSave">Save</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="widgetDialog">
+    <div class="dialog-inner">
+      <h2 id="widgetDialogTitle">Configure widget</h2>
+      <div class="field">
+        <label for="wTitle">Title</label>
+        <input id="wTitle" type="text" placeholder="Living room switches" />
+      </div>
+      <div class="field">
+        <label>Devices (select switches to include)</label>
+        <div class="device-list" id="devicePicker"></div>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" class="btn-sm" id="wCancel">Cancel</button>
+        <button type="button" class="btn-sm primary" id="wSave">Apply</button>
+      </div>
+    </div>
+  </dialog>
+
+  <script>
+    const WIDGET_DASHBOARD_VERSION = "1.0.0";
+    const STORAGE_KEY = "widget.dashboard.cfg";
+    const NORMAL_REFRESH_MS = 8000;
+    const FAST_REFRESH_MS = 1500;
+    const FAST_REFRESH_DURATION_MS = 12000;
+
+    const WIDGET_TEMPLATES = {
+      switches: {
+        label: "Switches (table)",
+        defaultW: 320,
+        defaultH: 240,
+        defaultTitle: "Switches",
+        defaultConfig: { deviceIds: [], attribute: "switch", onCommand: "on", offCommand: "off" }
+      }
+    };
+
+    let cfg = { hubIp: "", makerAppId: "", makerAccessToken: "", appInstallId: "" };
+    let dashboard = { version: 1, widgets: [] };
+    let devices = [];
+    let editMode = false;
+    let dirty = false;
+    let editingWidgetId = null;
+    let refreshTimer = null;
+    let fastRefreshUntil = 0;
+    let dragState = null;
+    let resizeState = null;
+
+    const els = {
+      canvas: document.getElementById("canvas"),
+      emptyState: document.getElementById("emptyState"),
+      msg: document.getElementById("msg"),
+      hubLabel: document.getElementById("hubLabel"),
+      editToggle: document.getElementById("editToggle"),
+      saveBtn: document.getElementById("saveBtn"),
+      addWidgetBtn: document.getElementById("addWidgetBtn"),
+      addTemplate: document.getElementById("addTemplate"),
+      refreshDevicesBtn: document.getElementById("refreshDevicesBtn"),
+      devicePicker: document.getElementById("devicePicker")
+    };
+
+    function uid() {
+      return "w" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    }
+
+    function sleep(ms) {
+      return new Promise((r) => setTimeout(r, ms));
+    }
+
+    function setMsg(text, isError) {
+      els.msg.textContent = text;
+      els.msg.className = "footer" + (isError ? " err" : "");
+    }
+
+    function loadStoredCfg() {
+      try {
+        const s = localStorage.getItem(STORAGE_KEY);
+        if (s) Object.assign(cfg, JSON.parse(s));
+      } catch (e) { /* ignore */ }
+    }
+
+    function saveStoredCfg() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    }
+
+    function apiBase() {
+      return `http://${cfg.hubIp}/apps/api/${cfg.makerAppId}`;
+    }
+
+    function appConfigUrl(method) {
+      return `http://${cfg.hubIp}/apps/installedapp/configure/${cfg.appInstallId}/config`;
+    }
+
+    function deviceUrl(deviceId) {
+      const q = `access_token=${encodeURIComponent(cfg.makerAccessToken)}`;
+      return `${apiBase()}/devices/${deviceId}?${q}`;
+    }
+
+    function devicesUrl() {
+      const q = `access_token=${encodeURIComponent(cfg.makerAccessToken)}`;
+      return `${apiBase()}/devices?${q}`;
+    }
+
+    function apiUrl(deviceId, command, param) {
+      const q = `access_token=${encodeURIComponent(cfg.makerAccessToken)}`;
+      const path = param != null && param !== "" ? `${command}/${encodeURIComponent(param)}` : command;
+      return `${apiBase()}/devices/${deviceId}/${path}?${q}`;
+    }
+
+    function collectAttributes(device) {
+      const out = {};
+      if (!device) return out;
+      const merge = (name, val) => {
+        if (name == null || val == null || val === "") return;
+        out[String(name).toLowerCase()] = val;
+      };
+      const a = device.attributes;
+      if (Array.isArray(a)) {
+        a.forEach((row) => merge(row.name, row.currentValue ?? row.value));
+      } else if (a && typeof a === "object") {
+        Object.entries(a).forEach(([k, v]) => merge(k, v?.currentValue ?? v));
+      }
+      const caps = device.capabilities;
+      if (Array.isArray(caps)) {
+        caps.forEach((cap) => {
+          if (cap && typeof cap === "object" && Array.isArray(cap.attributes)) {
+            cap.attributes.forEach((row) => merge(row.name, row.currentValue ?? row.value));
+          }
+        });
+      }
+      return out;
+    }
+
+    async function hubGet(deviceId) {
+      const res = await fetch(deviceUrl(deviceId));
+      if (!res.ok) throw new Error(`Device ${deviceId}: HTTP ${res.status}`);
+      return res.json();
+    }
+
+    async function hubCmd(deviceId, command, param) {
+      const url = apiUrl(deviceId, command, param);
+      let res = await fetch(url, { method: "GET" });
+      if (!res.ok) res = await fetch(url, { method: "POST" });
+      if (!res.ok) throw new Error(`${command} failed (${res.status})`);
+    }
+
+    async function loadConfigFile() {
+      try {
+        const res = await fetch("./widget-dashboard-config.json?ts=" + Date.now());
+        if (!res.ok) return false;
+        const data = await res.json();
+        cfg.hubIp = data.hubIp || cfg.hubIp;
+        cfg.makerAppId = data.makerAppId || cfg.makerAppId;
+        cfg.makerAccessToken = data.makerAccessToken || cfg.makerAccessToken;
+        cfg.appInstallId = data.appInstallId || cfg.appInstallId;
+        if (data.dashboard) dashboard = data.dashboard;
+        saveStoredCfg();
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    async function saveConfigToHub() {
+      if (!cfg.hubIp || !cfg.appInstallId) {
+        throw new Error("Hub IP and app install ID required");
+      }
+      const res = await fetch(appConfigUrl(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dashboard })
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`Save failed (${res.status}): ${text.slice(0, 120)}`);
+      }
+      dirty = false;
+      updateSaveBtn();
+      return res.json();
+    }
+
+    async function fetchDevices() {
+      if (!cfg.hubIp || !cfg.makerAccessToken || !cfg.makerAppId) {
+        throw new Error("Configure Maker API credentials");
+      }
+      const res = await fetch(devicesUrl());
+      if (!res.ok) throw new Error(`Devices list failed (${res.status})`);
+      const data = await res.json();
+      devices = Array.isArray(data) ? data : [];
+      devices.sort((a, b) => String(a.label || a.name || "").localeCompare(String(b.label || b.name || "")));
+      return devices;
+    }
+
+    function deviceLabel(d) {
+      return d.label || d.name || `Device ${d.id}`;
+    }
+
+    function deviceHasSwitchCapability(d) {
+      const caps = d.capabilities;
+      if (Array.isArray(caps)) {
+        return caps.some((c) => {
+          const name = typeof c === "string" ? c : c?.name || c?.capability;
+          return String(name).toLowerCase() === "switch";
+        });
+      }
+      return true;
+    }
+
+    function markDirty() {
+      dirty = true;
+      updateSaveBtn();
+    }
+
+    function updateSaveBtn() {
+      els.saveBtn.hidden = !editMode;
+      els.saveBtn.disabled = !dirty;
+      els.saveBtn.textContent = dirty ? "Save to Hub *" : "Saved";
+    }
+
+    function setEditMode(on) {
+      editMode = on;
+      document.body.classList.toggle("edit-mode", on);
+      els.editToggle.classList.toggle("active", on);
+      els.editToggle.textContent = on ? "Done editing" : "Edit layout";
+      updateSaveBtn();
+      renderAllWidgets();
+    }
+
+    function nextWidgetPosition(template) {
+      const count = dashboard.widgets.length;
+      const col = count % 3;
+      const row = Math.floor(count / 3);
+      return { x: 12 + col * (template.defaultW + 12), y: 12 + row * (template.defaultH + 12) };
+    }
+
+    function addWidget(type) {
+      const template = WIDGET_TEMPLATES[type];
+      if (!template) return;
+      const pos = nextWidgetPosition(template);
+      dashboard.widgets.push({
+        id: uid(),
+        type,
+        title: template.defaultTitle,
+        x: pos.x,
+        y: pos.y,
+        w: template.defaultW,
+        h: template.defaultH,
+        config: JSON.parse(JSON.stringify(template.defaultConfig))
+      });
+      markDirty();
+      renderAllWidgets();
+      openWidgetEditor(dashboard.widgets[dashboard.widgets.length - 1].id);
+    }
+
+    function removeWidget(id) {
+      dashboard.widgets = dashboard.widgets.filter((w) => w.id !== id);
+      markDirty();
+      renderAllWidgets();
+    }
+
+    function openWidgetEditor(id) {
+      const widget = dashboard.widgets.find((w) => w.id === id);
+      if (!widget) return;
+      editingWidgetId = id;
+      document.getElementById("widgetDialogTitle").textContent = `Configure: ${widget.title}`;
+      document.getElementById("wTitle").value = widget.title;
+      renderDevicePicker(widget.config.deviceIds || []);
+      document.getElementById("widgetDialog").showModal();
+    }
+
+    function renderDevicePicker(selectedIds) {
+      const selected = new Set(selectedIds.map(String));
+      if (!devices.length) {
+        els.devicePicker.innerHTML = '<div class="widget-empty">No devices loaded — click Refresh devices</div>';
+        return;
+      }
+      els.devicePicker.innerHTML = devices
+        .filter(deviceHasSwitchCapability)
+        .map((d) => {
+          const id = String(d.id);
+          const checked = selected.has(id) ? "checked" : "";
+          return `<label class="device-row"><input type="checkbox" value="${id}" ${checked} /> ${escapeHtml(deviceLabel(d))}</label>`;
+        })
+        .join("");
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    function applyWidgetEditor() {
+      const widget = dashboard.widgets.find((w) => w.id === editingWidgetId);
+      if (!widget) return;
+      widget.title = document.getElementById("wTitle").value.trim() || widget.title;
+      widget.config.deviceIds = [...els.devicePicker.querySelectorAll("input:checked")].map((el) => el.value);
+      markDirty();
+      editingWidgetId = null;
+      document.getElementById("widgetDialog").close();
+      renderAllWidgets();
+      burstRefresh();
+    }
+
+    function placeWidgetEl(el, widget) {
+      el.style.left = widget.x + "px";
+      el.style.top = widget.y + "px";
+      el.style.width = widget.w + "px";
+      el.style.height = widget.h + "px";
+    }
+
+    function renderAllWidgets() {
+      els.canvas.querySelectorAll(".widget").forEach((n) => n.remove());
+      els.emptyState.style.display = dashboard.widgets.length ? "none" : "flex";
+
+      dashboard.widgets.forEach((widget) => {
+        const el = document.createElement("div");
+        el.className = "widget";
+        el.dataset.id = widget.id;
+        placeWidgetEl(el, widget);
+
+        el.innerHTML = `
+          <div class="widget-head" data-drag="1">
+            <div class="widget-title">${escapeHtml(widget.title)}</div>
+            <div class="widget-actions">
+              ${editMode ? `<button type="button" data-action="configure" title="Configure">⚙</button>` : ""}
+              ${editMode ? `<button type="button" data-action="delete" title="Remove">✕</button>` : ""}
+            </div>
+          </div>
+          <div class="widget-body" data-body="1"></div>
+          <div class="resize-handle" data-resize="1"></div>
+        `;
+
+        if (editMode) {
+          el.querySelector('[data-action="configure"]').onclick = () => openWidgetEditor(widget.id);
+          el.querySelector('[data-action="delete"]').onclick = () => {
+            if (confirm(`Remove "${widget.title}"?`)) removeWidget(widget.id);
+          };
+          bindDrag(el, widget);
+          bindResize(el.querySelector("[data-resize]"), el, widget);
+        }
+
+        els.canvas.appendChild(el);
+        renderWidgetContent(widget, el.querySelector("[data-body]"));
+      });
+    }
+
+    async function renderWidgetContent(widget, container) {
+      if (widget.type === "switches") {
+        await renderSwitchesWidget(widget, container);
+      }
+    }
+
+    async function renderSwitchesWidget(widget, container) {
+      const ids = widget.config.deviceIds || [];
+      if (!ids.length) {
+        container.innerHTML = '<div class="widget-empty">No devices selected — configure this widget</div>';
+        return;
+      }
+
+      const rows = [];
+      for (const deviceId of ids) {
+        let label = `Device ${deviceId}`;
+        let value = null;
+        const cached = devices.find((d) => String(d.id) === String(deviceId));
+        if (cached) label = deviceLabel(cached);
+
+        try {
+          const d = await hubGet(deviceId);
+          label = deviceLabel(d);
+          const attrs = collectAttributes(d);
+          value = attrs[(widget.config.attribute || "switch").toLowerCase()];
+        } catch (e) {
+          value = null;
+        }
+
+        const isOn = String(value).toLowerCase() === "on";
+        rows.push({ deviceId, label, isOn });
+      }
+
+      container.innerHTML = `
+        <table class="switch-table">
+          <thead><tr><th>Name</th><th style="width:56px;text-align:center">Status</th></tr></thead>
+          <tbody>
+            ${rows.map((r) => `
+              <tr>
+                <td class="switch-name">${escapeHtml(r.label)}</td>
+                <td><button type="button" class="status-light ${r.isOn ? "on" : ""}" data-device="${r.deviceId}" aria-label="Toggle ${escapeHtml(r.label)}"></button></td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      `;
+
+      if (!editMode) {
+        container.querySelectorAll(".status-light").forEach((btn) => {
+          btn.onclick = () => toggleSwitch(btn, widget);
+        });
+      }
+    }
+
+    async function toggleSwitch(btn, widget) {
+      const deviceId = btn.dataset.device;
+      const isOn = btn.classList.contains("on");
+      const cmd = isOn ? (widget.config.offCommand || "off") : (widget.config.onCommand || "on");
+      btn.classList.add("pending");
+      try {
+        await hubCmd(deviceId, cmd);
+        btn.classList.toggle("on", !isOn);
+        setMsg(`${isOn ? "Off" : "On"} — ${deviceId}`);
+        burstRefresh();
+      } catch (e) {
+        setMsg(e.message, true);
+      } finally {
+        btn.classList.remove("pending");
+      }
+    }
+
+    function bindDrag(widgetEl, widget) {
+      const handle = widgetEl.querySelector("[data-drag]");
+      handle.addEventListener("pointerdown", (e) => {
+        if (e.target.closest("button")) return;
+        e.preventDefault();
+        dragState = {
+          widget,
+          widgetEl,
+          startX: e.clientX,
+          startY: e.clientY,
+          origX: widget.x,
+          origY: widget.y,
+          pointerId: e.pointerId
+        };
+        handle.setPointerCapture(e.pointerId);
+      });
+      handle.addEventListener("pointermove", (e) => {
+        if (!dragState || dragState.widget.id !== widget.id) return;
+        widget.x = Math.max(0, dragState.origX + (e.clientX - dragState.startX));
+        widget.y = Math.max(0, dragState.origY + (e.clientY - dragState.startY));
+        placeWidgetEl(dragState.widgetEl, widget);
+      });
+      const endDrag = (e) => {
+        if (!dragState || dragState.widget.id !== widget.id) return;
+        try { handle.releasePointerCapture(dragState.pointerId); } catch (err) { /* ignore */ }
+        dragState = null;
+        markDirty();
+      };
+      handle.addEventListener("pointerup", endDrag);
+      handle.addEventListener("pointercancel", endDrag);
+    }
+
+    function bindResize(handle, widgetEl, widget) {
+      handle.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        resizeState = {
+          widget,
+          widgetEl,
+          startX: e.clientX,
+          startY: e.clientY,
+          origW: widget.w,
+          origH: widget.h,
+          pointerId: e.pointerId
+        };
+        handle.setPointerCapture(e.pointerId);
+      });
+      handle.addEventListener("pointermove", (e) => {
+        if (!resizeState || resizeState.widget.id !== widget.id) return;
+        widget.w = Math.max(180, resizeState.origW + (e.clientX - resizeState.startX));
+        widget.h = Math.max(120, resizeState.origH + (e.clientY - resizeState.startY));
+        placeWidgetEl(resizeState.widgetEl, widget);
+      });
+      const endResize = (e) => {
+        if (!resizeState || resizeState.widget.id !== widget.id) return;
+        try { handle.releasePointerCapture(resizeState.pointerId); } catch (err) { /* ignore */ }
+        resizeState = null;
+        markDirty();
+      };
+      handle.addEventListener("pointerup", endResize);
+      handle.addEventListener("pointercancel", endResize);
+    }
+
+    async function refreshAllWidgets() {
+      if (!cfg.hubIp || !cfg.makerAccessToken) {
+        setMsg("Configure connection (⚙)", true);
+        return;
+      }
+      for (const widget of dashboard.widgets) {
+        const el = els.canvas.querySelector(`.widget[data-id="${widget.id}"]`);
+        if (!el) continue;
+        const body = el.querySelector("[data-body]");
+        if (body) await renderWidgetContent(widget, body);
+      }
+      setMsg("Updated " + new Date().toLocaleTimeString());
+    }
+
+    function scheduleRefresh() {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      const delay = Date.now() < fastRefreshUntil ? FAST_REFRESH_MS : NORMAL_REFRESH_MS;
+      refreshTimer = setTimeout(async () => {
+        await refreshAllWidgets();
+        scheduleRefresh();
+      }, delay);
+    }
+
+    function burstRefresh() {
+      fastRefreshUntil = Date.now() + FAST_REFRESH_DURATION_MS;
+      refreshAllWidgets();
+      scheduleRefresh();
+    }
+
+    els.editToggle.onclick = () => {
+      if (editMode && dirty) {
+        if (!confirm("You have unsaved changes. Exit edit mode anyway?")) return;
+      }
+      setEditMode(!editMode);
+    };
+
+    els.saveBtn.onclick = async () => {
+      try {
+        await saveConfigToHub();
+        setMsg("Layout saved to Hubitat");
+        await loadConfigFile();
+      } catch (e) {
+        setMsg(e.message, true);
+      }
+    };
+
+    els.addWidgetBtn.onclick = () => addWidget(els.addTemplate.value);
+
+    els.refreshDevicesBtn.onclick = async () => {
+      try {
+        await fetchDevices();
+        setMsg(`${devices.length} devices loaded`);
+        if (editingWidgetId) {
+          const widget = dashboard.widgets.find((w) => w.id === editingWidgetId);
+          if (widget) renderDevicePicker(widget.config.deviceIds || []);
+        }
+      } catch (e) {
+        setMsg(e.message, true);
+      }
+    };
+
+    document.getElementById("settingsBtn").onclick = () => {
+      document.getElementById("cfgHubIp").value = cfg.hubIp;
+      document.getElementById("cfgAppId").value = cfg.makerAppId;
+      document.getElementById("cfgToken").value = cfg.makerAccessToken;
+      document.getElementById("cfgInstallId").value = cfg.appInstallId;
+      document.getElementById("settingsDialog").showModal();
+    };
+    document.getElementById("cfgCancel").onclick = () => document.getElementById("settingsDialog").close();
+    document.getElementById("cfgSave").onclick = () => {
+      cfg.hubIp = document.getElementById("cfgHubIp").value.trim();
+      cfg.makerAppId = document.getElementById("cfgAppId").value.trim() || "1";
+      cfg.makerAccessToken = document.getElementById("cfgToken").value.trim();
+      cfg.appInstallId = document.getElementById("cfgInstallId").value.trim();
+      saveStoredCfg();
+      document.getElementById("settingsDialog").close();
+      els.hubLabel.textContent = cfg.hubIp ? `Hub ${cfg.hubIp} · v${WIDGET_DASHBOARD_VERSION}` : "Not configured";
+      burstRefresh();
+    };
+
+    document.getElementById("wCancel").onclick = () => {
+      editingWidgetId = null;
+      document.getElementById("widgetDialog").close();
+    };
+    document.getElementById("wSave").onclick = () => applyWidgetEditor();
+
+    (async function init() {
+      loadStoredCfg();
+      await loadConfigFile();
+      els.hubLabel.textContent = cfg.hubIp
+        ? `Hub ${cfg.hubIp} · v${WIDGET_DASHBOARD_VERSION}`
+        : "Open via hub /local/ URL";
+      try {
+        await fetchDevices();
+      } catch (e) {
+        setMsg(e.message, true);
+      }
+      renderAllWidgets();
+      await refreshAllWidgets();
+      scheduleRefresh();
+    })();
+  </script>
+</body>
+</html>
