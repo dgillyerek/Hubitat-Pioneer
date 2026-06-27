@@ -287,6 +287,7 @@
       </select>
       <button type="button" class="btn-sm primary" id="addWidgetBtn">Add</button>
       <span style="flex:1"></span>
+      <button type="button" class="btn-sm" id="exportBtn">Export JSON</button>
       <button type="button" class="btn-sm" id="refreshDevicesBtn">Refresh devices</button>
     </div>
 
@@ -347,7 +348,7 @@
   </dialog>
 
   <script>
-    const WIDGET_DASHBOARD_VERSION = "1.0.1";
+    const WIDGET_DASHBOARD_VERSION = "1.0.2";
     const STORAGE_KEY = "widget.dashboard.cfg";
     const NORMAL_REFRESH_MS = 8000;
     const FAST_REFRESH_MS = 1500;
@@ -493,7 +494,10 @@
 
     async function saveConfigToHub() {
       if (!cfg.hubIp || !cfg.appInstallId || !cfg.appAccessToken) {
-        throw new Error("Missing app credentials — re-save the Widget Dashboard app in Hubitat, then reload this page");
+        throw new Error(
+          "API token missing. In Hubitat: Apps Code → Widget Dashboard → OAuth (top right) → enable → Save. " +
+          "Then open the installed app and click Done. Or use Export JSON and import in the app."
+        );
       }
       const res = await fetch(appConfigUrl(), {
         method: "POST",
@@ -853,7 +857,22 @@
       }
     };
 
+    function exportLayoutJson() {
+      const json = JSON.stringify(dashboard, null, 2);
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "widget-dashboard-layout.json";
+      a.click();
+      URL.revokeObjectURL(url);
+      navigator.clipboard?.writeText(json).catch(() => {});
+      setMsg("Layout exported — paste into Widget Dashboard app if Save to Hub fails");
+    }
+
     els.addWidgetBtn.onclick = () => addWidget(els.addTemplate.value);
+
+    document.getElementById("exportBtn").onclick = () => exportLayoutJson();
 
     els.refreshDevicesBtn.onclick = async () => {
       try {

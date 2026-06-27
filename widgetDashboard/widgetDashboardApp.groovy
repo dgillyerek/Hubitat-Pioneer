@@ -22,17 +22,17 @@ definition(
     category:     "Convenience",
     iconUrl:      "",
     iconX2Url:    "",
-    oauthEnabled: false
+    oauthEnabled: true
 )
 
 preferences {
     page(name: "mainPage")
 }
 
-@Field static final String APP_VERSION          = "1.0.1"
+@Field static final String APP_VERSION          = "1.0.2"
 @Field static final String DASHBOARD_FILENAME   = "widget-dashboard.html"
 @Field static final String CONFIG_FILENAME       = "widget-dashboard-config.json"
-@Field static final String DEFAULT_DASHBOARD_URL = "https://raw.githubusercontent.com/dgillyerek/Hubitat-Pioneer/main/tools/widget-dashboard.html"
+@Field static final String DEFAULT_DASHBOARD_URL = "https://raw.githubusercontent.com/dgillyerek/Hubitat-Pioneer/main/widgetDashboard/widget-dashboard.html"
 
 @Field static final Map CORS_HEADERS = [
     "Access-Control-Allow-Origin":  "*",
@@ -75,17 +75,35 @@ def mainPage() {
             input "updateDashboard", "button", title: "Download / update dashboard file"
         }
 
+        section("Import layout (fallback)") {
+            paragraph "If <strong>Save to Hub</strong> fails in the dashboard, export JSON from the dashboard and paste it here."
+            input name: "importConfigJson", type: "text", title: "Layout JSON", required: false
+            input "importLayout", "button", title: "Import layout from JSON"
+        }
+
+        section("API access") {
+            paragraph "Required for <strong>Save to Hub</strong> from the dashboard browser UI.<br><br>" +
+                "<strong>One-time setup in Apps Code:</strong><br>" +
+                "1. Open this app's code under <strong>Apps Code</strong><br>" +
+                "2. Click <strong>OAuth</strong> (top right) and enable OAuth<br>" +
+                "3. Save the app code<br>" +
+                "4. Return here and click <strong>Done</strong>"
+            input "regenToken", "button", title: "Regenerate API access token"
+        }
+
         section("Status") {
             def hubIp = location.hubs[0]?.localIP ?: "?"
             def widgetCount = countWidgets()
             def configUrl = getLocalConfigUrl()
+            def tokenStatus = state.accessToken ? "ready (${state.accessToken.take(8)}…)" : "missing — enable OAuth in Apps Code, Save, then click Done here"
             paragraph "App: v${APP_VERSION}\n" +
                 "Dashboard: ${state.dashboardInstalled ? 'installed (v' + (state.dashboardVersion ?: '?') + ')' : 'not installed — click Done or Update'}\n" +
                 "Config file: ${state.configWritten ? 'written' : 'not written'}\n" +
                 "Widgets: ${widgetCount}\n" +
                 "Hub IP: ${hubIp}\n" +
                 "App install ID: ${app.id}\n" +
-                "Config API: ${configUrl ?: '(token not ready — re-save app)'}"
+                "API token: ${tokenStatus}\n" +
+                "Config API: ${configUrl ?: '(waiting for API token)'}"
         }
     }
 }
@@ -93,6 +111,10 @@ def mainPage() {
 def appButtonHandler(btn) {
     if (btn == "updateDashboard") {
         downloadDashboard(true)
+    } else if (btn == "importLayout") {
+        importLayoutFromSettings()
+    } else if (btn == "regenToken") {
+        regenerateAccessToken()
     }
 }
 
@@ -109,9 +131,51 @@ def initialize() {
 }
 
 def ensureAccessToken() {
-    if (!state.accessToken) {
-        createAccessToken()
-        log.info "Widget Dashboard access token created"
+    if (state.accessToken) {
+        return
+    }
+    try {
+        def token = createAccessToken()
+        if (token) {
+            state.accessToken = token
+        }
+        if (state.accessToken) {
+            log.info "Widget Dashboard API token created"
+        } else {
+            log.warn "Widget Dashboard: createAccessToken returned null — enable OAuth in Apps Code (OAuth button, top right), Save, then click Done on this app"
+        }
+    } catch (Exception e) {
+        log.error "Widget Dashboard: createAccessToken failed (${e.message}). Enable OAuth in Apps Code, Save, then click Done."
+    }
+}
+
+def regenerateAccessToken() {
+    try {
+        if (state.accessToken) {
+            revokeAccessToken()
+        }
+    } catch (Exception ignored) {
+        // first install or token already cleared
+    }
+    state.accessToken = null
+    ensureAccessToken()
+    writeConfigFile()
+    log.info "Widget Dashboard API token regenerated"
+}
+
+def importLayoutFromSettings() {
+    def json = settings?.importConfigJson?.trim()
+    if (!json) {
+        log.warn "Widget Dashboard import: paste layout JSON first"
+        return
+    }
+    try {
+        def parsed = new JsonSlurper().parseText(json)
+        state.dashboardConfigJson = JsonOutput.toJson(parsed)
+        writeConfigFile()
+        log.info "Widget Dashboard imported layout (${countWidgets()} widgets)"
+    } catch (Exception e) {
+        log.warn "Widget Dashboard import failed: ${e.message}"
     }
 }
 
