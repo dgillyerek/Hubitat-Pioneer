@@ -191,6 +191,45 @@
     .vol-readout.muted {
       opacity: 0.45;
     }
+    .zone.full-width { grid-column: 1 / -1; }
+    .thermo-temp {
+      font-size: 2.4rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      margin: 0 0 4px;
+      line-height: 1.1;
+    }
+    .thermo-temp .unit { font-size: 1.1rem; font-weight: 600; color: var(--muted); }
+    .setpoint-block {
+      grid-column: span 2;
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: 10px;
+      align-items: center;
+    }
+    .setpoint-label {
+      grid-column: span 3;
+      text-align: center;
+      font-size: 0.75rem;
+      color: var(--muted);
+      margin-bottom: -4px;
+    }
+    .setpoint-readout {
+      min-width: 72px;
+      text-align: center;
+      font-size: 1rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      padding: 10px 8px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--line);
+    }
+    .setpoint-readout.heat { color: #ff9f6b; }
+    .setpoint-readout.cool { color: #6bc5ff; }
+    .pill.heat { background: rgba(255,159,107,0.18); color: #ff9f6b; }
+    .pill.cool { background: rgba(107,197,255,0.18); color: #6bc5ff; }
+    .pill.idle { background: rgba(139,151,173,0.18); color: var(--muted); }
     .footer {
       margin-top: 14px;
       text-align: center;
@@ -285,6 +324,32 @@
           </button>
         </div>
       </section>
+
+      <section class="zone full-width" id="thermoZone">
+        <div class="zone-title">Thermostat</div>
+        <div class="status-row">
+          <span class="pill idle" id="thermoStatePill">—</span>
+          <span class="pill off" id="thermoFanPill">Fan —</span>
+        </div>
+        <p class="thermo-temp" id="thermoTemp" aria-live="polite">—<span class="unit">°</span></p>
+        <p class="meta" id="thermoMeta">Heat — · Cool —</p>
+        <div class="remote">
+          <div class="setpoint-block">
+            <span class="setpoint-label">Heat</span>
+            <button class="btn" id="thermoHeatDown" type="button" aria-label="Heat down">−</button>
+            <div class="setpoint-readout heat" id="thermoHeatSet">—</div>
+            <button class="btn accent" id="thermoHeatUp" type="button" aria-label="Heat up">+</button>
+          </div>
+          <div class="setpoint-block">
+            <span class="setpoint-label">Cool</span>
+            <button class="btn" id="thermoCoolDown" type="button" aria-label="Cool down">−</button>
+            <div class="setpoint-readout cool" id="thermoCoolSet">—</div>
+            <button class="btn accent" id="thermoCoolUp" type="button" aria-label="Cool up">+</button>
+          </div>
+          <button class="btn" id="thermoFanOn" type="button">Fan On</button>
+          <button class="btn accent" id="thermoFanAuto" type="button">Fan Auto</button>
+        </div>
+      </section>
     </div>
 
     <p class="footer" id="msg">Ready</p>
@@ -306,6 +371,8 @@
       <input id="cfgMainId" placeholder="e.g. 56" />
       <label>HD Zone device ID (optional)</label>
       <input id="cfgHdId" placeholder="e.g. 59" />
+      <label>Honeywell TCC thermostat device ID (optional)</label>
+      <input id="cfgThermoId" placeholder="e.g. 42" />
       <div class="dialog-actions">
         <button class="btn" type="button" id="cfgCancel">Cancel</button>
         <button class="btn accent" type="button" id="cfgSave">Save</button>
@@ -314,7 +381,7 @@
   </dialog>
 
   <script>
-    const PIONEER_DASHBOARD_VERSION = "1.0.8";
+    const PIONEER_DASHBOARD_VERSION = "1.1.1";
     const STORAGE_KEY = "pioneer.avr.remote.cfg";
     const DEBUG = new URLSearchParams(location.search).has("debug");
     const NORMAL_REFRESH_MS = 8000;
@@ -329,6 +396,7 @@
       makerAccessToken: "",
       mainDeviceId: "",
       hdZoneDeviceId: "",
+      thermostatDeviceId: "",
     };
 
     const els = {
@@ -344,6 +412,13 @@
       mainPower: document.getElementById("mainPower"),
       hdPower: document.getElementById("hdPower"),
       hdZone: document.getElementById("hdZone"),
+      thermoZone: document.getElementById("thermoZone"),
+      thermoStatePill: document.getElementById("thermoStatePill"),
+      thermoFanPill: document.getElementById("thermoFanPill"),
+      thermoTemp: document.getElementById("thermoTemp"),
+      thermoMeta: document.getElementById("thermoMeta"),
+      thermoHeatSet: document.getElementById("thermoHeatSet"),
+      thermoCoolSet: document.getElementById("thermoCoolSet"),
     };
 
     let refreshTimer = null;
@@ -376,7 +451,7 @@
           return null;
         }
         const t = await res.json();
-        return { main: t.mainState, hd: t.hdState };
+        return { main: t.mainState, hd: t.hdState, thermo: t.thermostatState };
       } catch (e) {
         return null;
       }
@@ -423,7 +498,17 @@
       return true;
     }
 
+    function isHubHosted() {
+      return location.protocol.startsWith("http") && /\/local\//.test(location.pathname);
+    }
+
     function apiBase() {
+      if (isHubHosted()) {
+        return `/apps/api/${cfg.makerAppId}`;
+      }
+      if (!cfg.hubIp) {
+        throw new Error("Hub IP not configured");
+      }
       return `http://${cfg.hubIp}/apps/api/${cfg.makerAppId}`;
     }
 
@@ -475,7 +560,9 @@
         });
       }
 
-      ["volumedb", "volume", "level", "mute", "switch", "input", "mediainputsource"].forEach((key) => {
+      ["volumedb", "volume", "level", "mute", "switch", "input", "mediainputsource",
+        "temperature", "heatingsetpoint", "coolingsetpoint", "thermostatfanmode",
+        "thermostatoperatingstate", "thermostatmode"].forEach((key) => {
         if (device[key] != null && out[key] == null) {
           merge(key, device[key]);
         }
@@ -555,12 +642,16 @@
 
     async function hubCmd(deviceId, command, param) {
       const url = apiUrl(deviceId, command, param);
-      let res = await fetch(url, { method: "GET" });
+      let res = await fetch(url, { method: "POST" });
       if (!res.ok) {
-        res = await fetch(url, { method: "POST" });
+        res = await fetch(url, { method: "GET" });
       }
       if (!res.ok) {
-        throw new Error(`${command}${param != null ? "/" + param : ""} failed (${res.status})`);
+        const body = await res.text().catch(() => "");
+        throw new Error(
+          `${command}${param != null ? "/" + param : ""} failed (${res.status})` +
+          (body ? `: ${body.slice(0, 120)}` : "")
+        );
       }
     }
 
@@ -741,6 +832,152 @@
       return attr(device, "mediaInputSource") || attr(device, "input") || "—";
     }
 
+    function formatTemp(raw) {
+      if (raw == null || raw === "") {
+        return null;
+      }
+      const n = parseFloat(String(raw).replace(/[^\d.-]/g, ""));
+      if (Number.isNaN(n)) {
+        return String(raw);
+      }
+      return Number.isInteger(n) ? String(n) : n.toFixed(1);
+    }
+
+    function hasThermoData(state) {
+      return state &&
+        (state.temperature != null ||
+         state.heatingSetpoint != null ||
+         state.coolingSetpoint != null);
+    }
+
+    function setThermoUi(state) {
+      if (!state) {
+        return false;
+      }
+      const temp = formatTemp(state.temperature);
+      const heat = formatTemp(state.heatingSetpoint);
+      const cool = formatTemp(state.coolingSetpoint);
+      const fanMode = state.thermostatFanMode || "—";
+      const opState = state.thermostatOperatingState || state.thermostatMode || "—";
+
+      els.thermoTemp.innerHTML = (temp || "—") + '<span class="unit">°</span>';
+      els.thermoHeatSet.textContent = heat || "—";
+      els.thermoCoolSet.textContent = cool || "—";
+      els.thermoMeta.textContent = `Heat ${heat || "—"}° · Cool ${cool || "—"}°`;
+
+      const opLower = String(opState).toLowerCase();
+      let pillClass = "pill idle";
+      if (opLower.includes("heat")) {
+        pillClass = "pill heat";
+      } else if (opLower.includes("cool")) {
+        pillClass = "pill cool";
+      }
+      els.thermoStatePill.textContent = opState;
+      els.thermoStatePill.className = pillClass;
+
+      const fanOn = String(fanMode).toLowerCase() === "on";
+      els.thermoFanPill.textContent = "Fan " + fanMode;
+      els.thermoFanPill.className = "pill " + (fanOn ? "on" : "off");
+
+      document.getElementById("thermoFanOn").className = "btn" + (fanOn ? " accent" : "");
+      document.getElementById("thermoFanAuto").className = "btn" + (!fanOn && String(fanMode).toLowerCase() === "auto" ? " accent" : "");
+      return true;
+    }
+
+    function thermoStateFromDevice(device) {
+      return {
+        temperature: attr(device, "temperature"),
+        heatingSetpoint: attr(device, "heatingSetpoint"),
+        coolingSetpoint: attr(device, "coolingSetpoint"),
+        thermostatFanMode: attr(device, "thermostatFanMode"),
+        thermostatOperatingState: attr(device, "thermostatOperatingState") || attr(device, "ThermostatOperatingState"),
+        thermostatMode: attr(device, "thermostatMode"),
+      };
+    }
+
+    function optimisticThermoStep(kind, delta) {
+      const el = kind === "heat" ? els.thermoHeatSet : els.thermoCoolSet;
+      const current = parseFloat(el.textContent);
+      if (Number.isNaN(current)) {
+        return;
+      }
+      const step = Number.isInteger(current) ? 1 : 0.5;
+      const next = current + delta * step;
+      const label = formatTemp(next);
+      el.textContent = label;
+      const heat = kind === "heat" ? label : els.thermoHeatSet.textContent;
+      const cool = kind === "cool" ? label : els.thermoCoolSet.textContent;
+      els.thermoMeta.textContent = `Heat ${heat}° · Cool ${cool}°`;
+    }
+
+    async function thermoStateFromApi(deviceId) {
+      try {
+        const d = await hubGet(deviceId);
+        const state = thermoStateFromDevice(d);
+        if (hasThermoData(state)) {
+          return state;
+        }
+      } catch (e) {
+        if (DEBUG) {
+          console.warn("thermostat hubGet failed", e);
+        }
+      }
+      const names = [
+        "temperature", "heatingSetpoint", "coolingSetpoint",
+        "thermostatFanMode", "thermostatOperatingState", "thermostatMode",
+      ];
+      const state = {};
+      for (const name of names) {
+        state[name] = await fetchMakerAttribute(deviceId, name);
+      }
+      return state;
+    }
+
+    async function refreshThermostat() {
+      if (!cfg.thermostatDeviceId) {
+        els.thermoZone.style.opacity = "0.45";
+        els.thermoTemp.innerHTML = "—<span class=\"unit\">°</span>";
+        els.thermoMeta.textContent = "Not configured — set device ID in ⚙ (e.g. 252)";
+        return;
+      }
+      if (!cfg.makerAccessToken) {
+        throw new Error("Maker API token not configured");
+      }
+      els.thermoZone.style.opacity = "1";
+      const state = await thermoStateFromApi(cfg.thermostatDeviceId);
+      if (!hasThermoData(state)) {
+        throw new Error("No thermostat data from Maker API for device " + cfg.thermostatDeviceId);
+      }
+      setThermoUi(state);
+    }
+
+    async function pollThermostatAfterCommand() {
+      const deadline = Date.now() + 4000;
+      while (Date.now() < deadline) {
+        try {
+          const state = await thermoStateFromApi(cfg.thermostatDeviceId);
+          if (hasThermoData(state)) {
+            setThermoUi(state);
+            return;
+          }
+        } catch (e) {}
+        await sleep(300);
+      }
+    }
+
+    async function sendThermoCommand(command, label, optimistic) {
+      if (!cfg.thermostatDeviceId) {
+        throw new Error("Thermostat not configured — enter device ID in ⚙");
+      }
+      if (typeof optimistic === "function") {
+        optimistic();
+      }
+      await hubCmd(cfg.thermostatDeviceId, command);
+      setMsg(label);
+      await pollThermostatAfterCommand();
+      burstRefresh();
+    }
+
     async function refreshZone(deviceId, prefix) {
       if (!deviceId) return;
       const d = await hubGet(deviceId);
@@ -771,8 +1008,12 @@
     }
 
     async function refreshAll() {
-      if (!cfg.hubIp || !cfg.makerAccessToken || !cfg.mainDeviceId) {
+      if (!cfg.makerAccessToken || (!cfg.hubIp && !isHubHosted())) {
         setMsg("Configure connection (⚙)", true);
+        return;
+      }
+      if (!cfg.mainDeviceId && !cfg.thermostatDeviceId) {
+        setMsg("Configure at least one device (⚙)", true);
         return;
       }
       if (refreshInFlight) {
@@ -793,7 +1034,7 @@
             els.hdZone.style.opacity = "0.45";
             els.hdInput.textContent = "Not configured";
           }
-        } else {
+        } else if (cfg.mainDeviceId) {
           await refreshZone(cfg.mainDeviceId, "main");
           if (cfg.hdZoneDeviceId) {
             els.hdZone.style.opacity = "1";
@@ -806,8 +1047,20 @@
             setMsg("Using Maker API — re-save Pioneer AVR Dashboard app (v1.1.0+)", true);
           }
         }
+        if (cfg.thermostatDeviceId) {
+          try {
+            await refreshThermostat();
+          } catch (thermoErr) {
+            setMsg(thermoErr.message, true);
+          }
+        } else {
+          els.thermoZone.style.opacity = "0.45";
+          els.thermoMeta.textContent = "Not configured";
+        }
         if (!DEBUG || appState?.main) {
-          setMsg("Updated " + new Date().toLocaleTimeString());
+          if (!els.msg.classList.contains("err")) {
+            setMsg("Updated " + new Date().toLocaleTimeString());
+          }
         }
       } catch (e) {
         setMsg(e.message, true);
@@ -877,6 +1130,7 @@
         cfg.makerAccessToken = t.makerAccessToken || cfg.makerAccessToken;
         cfg.mainDeviceId = t.mainDeviceId || cfg.mainDeviceId;
         cfg.hdZoneDeviceId = t.hdZoneDeviceId || cfg.hdZoneDeviceId;
+        cfg.thermostatDeviceId = t.thermostatDeviceId || cfg.thermostatDeviceId;
         saveStoredCfg();
         return true;
       } catch (e) {
@@ -910,6 +1164,28 @@
         if (!cfg.hdZoneDeviceId) return setMsg("HD Zone not configured", true);
         togglePower(cfg.hdZoneDeviceId, "HD").catch(err);
       };
+
+      const thermoCmd = (command, label, optimistic) => {
+        sendThermoCommand(command, label, optimistic).catch(err);
+      };
+      document.getElementById("thermoHeatUp").onclick = () =>
+        thermoCmd("heatLevelUp", "Heat +", () => optimisticThermoStep("heat", 1));
+      document.getElementById("thermoHeatDown").onclick = () =>
+        thermoCmd("heatLevelDown", "Heat −", () => optimisticThermoStep("heat", -1));
+      document.getElementById("thermoCoolUp").onclick = () =>
+        thermoCmd("coolLevelUp", "Cool +", () => optimisticThermoStep("cool", 1));
+      document.getElementById("thermoCoolDown").onclick = () =>
+        thermoCmd("coolLevelDown", "Cool −", () => optimisticThermoStep("cool", -1));
+      document.getElementById("thermoFanOn").onclick = () =>
+        thermoCmd("fanOn", "Fan on", () => {
+          els.thermoFanPill.textContent = "Fan on";
+          els.thermoFanPill.className = "pill on";
+        });
+      document.getElementById("thermoFanAuto").onclick = () =>
+        thermoCmd("fanAuto", "Fan auto", () => {
+          els.thermoFanPill.textContent = "Fan auto";
+          els.thermoFanPill.className = "pill off";
+        });
     }
 
     const dialog = document.getElementById("settingsDialog");
@@ -919,6 +1195,7 @@
       document.getElementById("cfgToken").value = cfg.makerAccessToken;
       document.getElementById("cfgMainId").value = cfg.mainDeviceId;
       document.getElementById("cfgHdId").value = cfg.hdZoneDeviceId;
+      document.getElementById("cfgThermoId").value = cfg.thermostatDeviceId;
       dialog.showModal();
     };
     document.getElementById("cfgCancel").onclick = () => dialog.close();
@@ -928,6 +1205,7 @@
       cfg.makerAccessToken = document.getElementById("cfgToken").value.trim();
       cfg.mainDeviceId = document.getElementById("cfgMainId").value.trim();
       cfg.hdZoneDeviceId = document.getElementById("cfgHdId").value.trim();
+      cfg.thermostatDeviceId = document.getElementById("cfgThermoId").value.trim();
       saveStoredCfg();
       dialog.close();
       els.hubLabel.textContent = cfg.hubIp ? `Hub ${cfg.hubIp}` : "Not configured";
