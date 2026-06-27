@@ -347,7 +347,7 @@
   </dialog>
 
   <script>
-    const WIDGET_DASHBOARD_VERSION = "1.0.0";
+    const WIDGET_DASHBOARD_VERSION = "1.0.1";
     const STORAGE_KEY = "widget.dashboard.cfg";
     const NORMAL_REFRESH_MS = 8000;
     const FAST_REFRESH_MS = 1500;
@@ -363,7 +363,7 @@
       }
     };
 
-    let cfg = { hubIp: "", makerAppId: "", makerAccessToken: "", appInstallId: "" };
+    let cfg = { hubIp: "", makerAppId: "", makerAccessToken: "", appInstallId: "", appAccessToken: "" };
     let dashboard = { version: 1, widgets: [] };
     let devices = [];
     let editMode = false;
@@ -415,8 +415,9 @@
       return `http://${cfg.hubIp}/apps/api/${cfg.makerAppId}`;
     }
 
-    function appConfigUrl(method) {
-      return `http://${cfg.hubIp}/apps/installedapp/configure/${cfg.appInstallId}/config`;
+    function appConfigUrl() {
+      const q = `access_token=${encodeURIComponent(cfg.appAccessToken)}`;
+      return `http://${cfg.hubIp}/apps/api/${cfg.appInstallId}/config?${q}`;
     }
 
     function deviceUrl(deviceId) {
@@ -481,6 +482,7 @@
         cfg.makerAppId = data.makerAppId || cfg.makerAppId;
         cfg.makerAccessToken = data.makerAccessToken || cfg.makerAccessToken;
         cfg.appInstallId = data.appInstallId || cfg.appInstallId;
+        cfg.appAccessToken = data.appAccessToken || cfg.appAccessToken;
         if (data.dashboard) dashboard = data.dashboard;
         saveStoredCfg();
         return true;
@@ -490,8 +492,8 @@
     }
 
     async function saveConfigToHub() {
-      if (!cfg.hubIp || !cfg.appInstallId) {
-        throw new Error("Hub IP and app install ID required");
+      if (!cfg.hubIp || !cfg.appInstallId || !cfg.appAccessToken) {
+        throw new Error("Missing app credentials — re-save the Widget Dashboard app in Hubitat, then reload this page");
       }
       const res = await fetch(appConfigUrl(), {
         method: "POST",

@@ -29,7 +29,7 @@ preferences {
     page(name: "mainPage")
 }
 
-@Field static final String APP_VERSION          = "1.0.0"
+@Field static final String APP_VERSION          = "1.0.1"
 @Field static final String DASHBOARD_FILENAME   = "widget-dashboard.html"
 @Field static final String CONFIG_FILENAME       = "widget-dashboard-config.json"
 @Field static final String DEFAULT_DASHBOARD_URL = "https://raw.githubusercontent.com/dgillyerek/Hubitat-Pioneer/main/tools/widget-dashboard.html"
@@ -78,12 +78,14 @@ def mainPage() {
         section("Status") {
             def hubIp = location.hubs[0]?.localIP ?: "?"
             def widgetCount = countWidgets()
+            def configUrl = getLocalConfigUrl()
             paragraph "App: v${APP_VERSION}\n" +
                 "Dashboard: ${state.dashboardInstalled ? 'installed (v' + (state.dashboardVersion ?: '?') + ')' : 'not installed — click Done or Update'}\n" +
                 "Config file: ${state.configWritten ? 'written' : 'not written'}\n" +
                 "Widgets: ${widgetCount}\n" +
                 "Hub IP: ${hubIp}\n" +
-                "App install ID: ${app.id}"
+                "App install ID: ${app.id}\n" +
+                "Config API: ${configUrl ?: '(token not ready — re-save app)'}"
         }
     }
 }
@@ -99,10 +101,18 @@ def updated()   { initialize() }
 
 def initialize() {
     unschedule()
+    ensureAccessToken()
     downloadDashboard(false)
     writeConfigFile()
     runIn(2, "refreshConfigLoop")
     log.info "Widget Dashboard v${APP_VERSION} ready — install ID ${app.id}"
+}
+
+def ensureAccessToken() {
+    if (!state.accessToken) {
+        createAccessToken()
+        log.info "Widget Dashboard access token created"
+    }
 }
 
 def refreshConfigLoop() {
@@ -144,6 +154,9 @@ def saveConfig() {
         def body = request?.JSON
         if (!body && request?.postBody) {
             body = new JsonSlurper().parseText(request.postBody.toString())
+        }
+        if (!body && request?.body) {
+            body = new JsonSlurper().parseText(request.body.toString())
         }
         if (!body) {
             render status: 400, contentType: "application/json", headers: CORS_HEADERS,
@@ -199,10 +212,18 @@ private Map buildConfigPayload() {
         makerAppId:       settings?.makerAppId?.toString() ?: "",
         makerAccessToken: settings?.makerAccessToken?.toString() ?: "",
         appInstallId:     app.id.toString(),
+        appAccessToken:   state.accessToken?.toString() ?: "",
         dashboard:        loadDashboardConfig(),
         dashboardVersion: state.dashboardVersion ?: APP_VERSION,
         appVersion:       APP_VERSION
     ]
+}
+
+private String getLocalConfigUrl() {
+    if (!state.accessToken) {
+        return null
+    }
+    return "${getFullLocalApiServerUrl()}/config?access_token=${state.accessToken}"
 }
 
 private Map loadDashboardConfig() {
