@@ -213,6 +213,32 @@
       box-shadow: 0 0 12px rgba(46,204,113,0.45);
     }
     .status-light.pending { opacity: 0.5; }
+    .level-cell { width: 55%; min-width: 140px; }
+    .level-control {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .level-control input[type=range] {
+      flex: 1;
+      min-width: 80px;
+      height: 28px;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+    body.edit-mode .level-control input[type=range] {
+      cursor: not-allowed;
+      opacity: 0.55;
+      pointer-events: none;
+    }
+    .level-readout {
+      font-size: 0.75rem;
+      color: var(--muted);
+      min-width: 38px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    .level-control.pending input[type=range] { opacity: 0.5; }
     .widget-empty { color: var(--muted); font-size: 0.82rem; text-align: center; padding: 16px 8px; }
     footer {
       flex: 0 0 auto;
@@ -254,6 +280,22 @@
       border-radius: 10px;
       background: var(--panel2);
     }
+    .device-search {
+      width: 100%;
+      background: var(--panel2);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      color: var(--text);
+      padding: 10px 12px;
+      font-size: 0.9rem;
+      margin-bottom: 8px;
+    }
+    .device-search::placeholder { color: var(--muted); }
+    .device-picker-meta {
+      font-size: 0.72rem;
+      color: var(--muted);
+      margin-top: 6px;
+    }
     .device-row {
       display: flex;
       align-items: center;
@@ -284,6 +326,7 @@
       <label for="addTemplate">Add widget:</label>
       <select id="addTemplate">
         <option value="switches">Switches (table)</option>
+        <option value="dimmers">Dimmers (table + slider)</option>
       </select>
       <button type="button" class="btn-sm primary" id="addWidgetBtn">Add</button>
       <span style="flex:1"></span>
@@ -337,8 +380,10 @@
         <input id="wTitle" type="text" placeholder="Living room switches" />
       </div>
       <div class="field">
-        <label>Devices (select switches to include)</label>
+        <label for="deviceSearch">Devices</label>
+        <input id="deviceSearch" class="device-search" type="search" placeholder="Search lights and switches…" autocomplete="off" />
         <div class="device-list" id="devicePicker"></div>
+        <div class="device-picker-meta" id="devicePickerMeta"></div>
       </div>
       <div class="dialog-actions">
         <button type="button" class="btn-sm" id="wCancel">Cancel</button>
@@ -348,7 +393,7 @@
   </dialog>
 
   <script>
-    const WIDGET_DASHBOARD_VERSION = "1.0.2";
+    const WIDGET_DASHBOARD_VERSION = "1.0.4";
     const STORAGE_KEY = "widget.dashboard.cfg";
     const NORMAL_REFRESH_MS = 8000;
     const FAST_REFRESH_MS = 1500;
@@ -361,6 +406,20 @@
         defaultH: 240,
         defaultTitle: "Switches",
         defaultConfig: { deviceIds: [], attribute: "switch", onCommand: "on", offCommand: "off" }
+      },
+      dimmers: {
+        label: "Dimmers (table + slider)",
+        defaultW: 420,
+        defaultH: 280,
+        defaultTitle: "Dimmers",
+        defaultConfig: {
+          deviceIds: [],
+          attribute: "switch",
+          levelAttribute: "level",
+          onCommand: "on",
+          offCommand: "off",
+          levelCommand: "setLevel"
+        }
       }
     };
 
@@ -374,6 +433,7 @@
     let fastRefreshUntil = 0;
     let dragState = null;
     let resizeState = null;
+    let pickerSelectedIds = new Set();
 
     const els = {
       canvas: document.getElementById("canvas"),
@@ -385,7 +445,9 @@
       addWidgetBtn: document.getElementById("addWidgetBtn"),
       addTemplate: document.getElementById("addTemplate"),
       refreshDevicesBtn: document.getElementById("refreshDevicesBtn"),
-      devicePicker: document.getElementById("devicePicker")
+      devicePicker: document.getElementById("devicePicker"),
+      devicePickerMeta: document.getElementById("devicePickerMeta"),
+      deviceSearch: document.getElementById("deviceSearch")
     };
 
     function uid() {
@@ -529,15 +591,33 @@
       return d.label || d.name || `Device ${d.id}`;
     }
 
-    function deviceHasSwitchCapability(d) {
+    function deviceHasCapability(d, capName) {
       const caps = d.capabilities;
-      if (Array.isArray(caps)) {
-        return caps.some((c) => {
-          const name = typeof c === "string" ? c : c?.name || c?.capability;
-          return String(name).toLowerCase() === "switch";
-        });
-      }
-      return true;
+      if (!Array.isArray(caps)) return false;
+      const target = capName.toLowerCase();
+      return caps.some((c) => {
+        const name = typeof c === "string" ? c : c?.name || c?.capability;
+        return String(name).toLowerCase() === target;
+      });
+    }
+
+    function deviceHasSwitchCapability(d) {
+      return deviceHasCapability(d, "switch");
+    }
+
+    function deviceHasDimmerCapability(d) {
+      return deviceHasSwitchCapability(d) &&
+        (deviceHasCapability(d, "switchlevel") || deviceHasCapability(d, "changelevel"));
+    }
+
+    function pickerDeviceFilter(widgetType) {
+      return widgetType === "dimmers" ? deviceHasDimmerCapability : deviceHasSwitchCapability;
+    }
+
+    function parseLevel(attrs) {
+      const raw = attrs.level ?? attrs.brightness ?? attrs.lvl;
+      const n = parseInt(raw, 10);
+      return Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : 0;
     }
 
     function markDirty() {
@@ -596,26 +676,61 @@
       const widget = dashboard.widgets.find((w) => w.id === id);
       if (!widget) return;
       editingWidgetId = id;
+      pickerSelectedIds = new Set((widget.config.deviceIds || []).map(String));
       document.getElementById("widgetDialogTitle").textContent = `Configure: ${widget.title}`;
       document.getElementById("wTitle").value = widget.title;
-      renderDevicePicker(widget.config.deviceIds || []);
+      document.getElementById("wTitle").placeholder =
+        widget.type === "dimmers" ? "Kitchen dimmers" : "Living room switches";
+      els.deviceSearch.placeholder =
+        widget.type === "dimmers" ? "Search dimmers and lights…" : "Search lights and switches…";
+      els.deviceSearch.value = "";
+      renderDevicePicker();
       document.getElementById("widgetDialog").showModal();
+      els.deviceSearch.focus();
     }
 
-    function renderDevicePicker(selectedIds) {
-      const selected = new Set(selectedIds.map(String));
-      if (!devices.length) {
+    function updatePickerMeta(shownCount, totalCount) {
+      const selected = pickerSelectedIds.size;
+      const parts = [`${selected} selected`];
+      if (totalCount != null) {
+        parts.push(`${shownCount} shown of ${totalCount}`);
+      }
+      els.devicePickerMeta.textContent = parts.join(" · ");
+    }
+
+    function renderDevicePicker() {
+      const widget = dashboard.widgets.find((w) => w.id === editingWidgetId);
+      const filterFn = pickerDeviceFilter(widget?.type || "switches");
+      const query = els.deviceSearch.value.trim().toLowerCase();
+      const eligibleDevices = devices.filter(filterFn);
+      if (!eligibleDevices.length) {
         els.devicePicker.innerHTML = '<div class="widget-empty">No devices loaded — click Refresh devices</div>';
+        els.devicePickerMeta.textContent = "";
         return;
       }
-      els.devicePicker.innerHTML = devices
-        .filter(deviceHasSwitchCapability)
+      const filtered = query
+        ? eligibleDevices.filter((d) => deviceLabel(d).toLowerCase().includes(query))
+        : eligibleDevices;
+      if (!filtered.length) {
+        els.devicePicker.innerHTML = '<div class="widget-empty">No devices match your search</div>';
+        updatePickerMeta(0, eligibleDevices.length);
+        return;
+      }
+      els.devicePicker.innerHTML = filtered
         .map((d) => {
           const id = String(d.id);
-          const checked = selected.has(id) ? "checked" : "";
+          const checked = pickerSelectedIds.has(id) ? "checked" : "";
           return `<label class="device-row"><input type="checkbox" value="${id}" ${checked} /> ${escapeHtml(deviceLabel(d))}</label>`;
         })
         .join("");
+      els.devicePicker.querySelectorAll("input[type=checkbox]").forEach((inp) => {
+        inp.onchange = () => {
+          if (inp.checked) pickerSelectedIds.add(inp.value);
+          else pickerSelectedIds.delete(inp.value);
+          updatePickerMeta(filtered.length, eligibleDevices.length);
+        };
+      });
+      updatePickerMeta(filtered.length, eligibleDevices.length);
     }
 
     function escapeHtml(s) {
@@ -626,7 +741,7 @@
       const widget = dashboard.widgets.find((w) => w.id === editingWidgetId);
       if (!widget) return;
       widget.title = document.getElementById("wTitle").value.trim() || widget.title;
-      widget.config.deviceIds = [...els.devicePicker.querySelectorAll("input:checked")].map((el) => el.value);
+      widget.config.deviceIds = [...pickerSelectedIds];
       markDirty();
       editingWidgetId = null;
       document.getElementById("widgetDialog").close();
@@ -680,7 +795,34 @@
     async function renderWidgetContent(widget, container) {
       if (widget.type === "switches") {
         await renderSwitchesWidget(widget, container);
+      } else if (widget.type === "dimmers") {
+        await renderDimmersWidget(widget, container);
       }
+    }
+
+    async function fetchDeviceRow(deviceId, widget) {
+      let label = `Device ${deviceId}`;
+      let switchVal = null;
+      let level = 0;
+      const cached = devices.find((d) => String(d.id) === String(deviceId));
+      if (cached) label = deviceLabel(cached);
+
+      try {
+        const d = await hubGet(deviceId);
+        label = deviceLabel(d);
+        const attrs = collectAttributes(d);
+        switchVal = attrs[(widget.config.attribute || "switch").toLowerCase()];
+        level = parseLevel(attrs);
+      } catch (e) {
+        switchVal = null;
+      }
+
+      return {
+        deviceId,
+        label,
+        isOn: String(switchVal).toLowerCase() === "on",
+        level
+      };
     }
 
     async function renderSwitchesWidget(widget, container) {
@@ -692,22 +834,7 @@
 
       const rows = [];
       for (const deviceId of ids) {
-        let label = `Device ${deviceId}`;
-        let value = null;
-        const cached = devices.find((d) => String(d.id) === String(deviceId));
-        if (cached) label = deviceLabel(cached);
-
-        try {
-          const d = await hubGet(deviceId);
-          label = deviceLabel(d);
-          const attrs = collectAttributes(d);
-          value = attrs[(widget.config.attribute || "switch").toLowerCase()];
-        } catch (e) {
-          value = null;
-        }
-
-        const isOn = String(value).toLowerCase() === "on";
-        rows.push({ deviceId, label, isOn });
+        rows.push(await fetchDeviceRow(deviceId, widget));
       }
 
       container.innerHTML = `
@@ -728,6 +855,86 @@
         container.querySelectorAll(".status-light").forEach((btn) => {
           btn.onclick = () => toggleSwitch(btn, widget);
         });
+      }
+    }
+
+    async function renderDimmersWidget(widget, container) {
+      const ids = widget.config.deviceIds || [];
+      if (!ids.length) {
+        container.innerHTML = '<div class="widget-empty">No devices selected — configure this widget</div>';
+        return;
+      }
+
+      const activeSlider = container.querySelector('input[type=range]:focus');
+      const activeDeviceId = activeSlider?.dataset.device;
+
+      const rows = [];
+      for (const deviceId of ids) {
+        rows.push(await fetchDeviceRow(deviceId, widget));
+      }
+
+      container.innerHTML = `
+        <table class="switch-table">
+          <thead><tr><th>Name</th><th style="width:56px;text-align:center">Power</th><th class="level-cell">Level</th></tr></thead>
+          <tbody>
+            ${rows.map((r) => `
+              <tr data-device="${r.deviceId}">
+                <td class="switch-name">${escapeHtml(r.label)}</td>
+                <td><button type="button" class="status-light ${r.isOn ? "on" : ""}" data-device="${r.deviceId}" aria-label="Toggle ${escapeHtml(r.label)}"></button></td>
+                <td class="level-cell">
+                  <div class="level-control">
+                    <input type="range" min="0" max="100" step="1" value="${r.level}" data-device="${r.deviceId}" aria-label="Dim ${escapeHtml(r.label)}" />
+                    <span class="level-readout">${r.level}%</span>
+                  </div>
+                </td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      `;
+
+      if (!editMode) {
+        container.querySelectorAll(".status-light").forEach((btn) => {
+          btn.onclick = () => toggleSwitch(btn, widget);
+        });
+        container.querySelectorAll('input[type=range]').forEach((slider) => {
+          const row = slider.closest("tr");
+          const readout = row.querySelector(".level-readout");
+          const light = row.querySelector(".status-light");
+
+          slider.oninput = () => {
+            readout.textContent = `${slider.value}%`;
+          };
+          slider.onchange = () => setDeviceLevel(slider, light, widget);
+        });
+
+        if (activeDeviceId) {
+          const slider = container.querySelector(`input[type=range][data-device="${activeDeviceId}"]`);
+          if (slider) {
+            slider.focus();
+            slider.value = activeSlider.value;
+            slider.closest("tr").querySelector(".level-readout").textContent = `${slider.value}%`;
+          }
+        }
+      }
+    }
+
+    async function setDeviceLevel(slider, lightEl, widget) {
+      const deviceId = slider.dataset.device;
+      const level = Math.round(Math.min(100, Math.max(0, Number(slider.value))));
+      slider.value = level;
+      slider.closest(".level-control").classList.add("pending");
+      try {
+        await hubCmd(deviceId, widget.config.levelCommand || "setLevel", level);
+        if (lightEl) {
+          lightEl.classList.toggle("on", level > 0);
+        }
+        setMsg(`Level ${level}% — ${deviceId}`);
+        burstRefresh();
+      } catch (e) {
+        setMsg(e.message, true);
+      } finally {
+        slider.closest(".level-control").classList.remove("pending");
       }
     }
 
@@ -820,6 +1027,7 @@
         const el = els.canvas.querySelector(`.widget[data-id="${widget.id}"]`);
         if (!el) continue;
         const body = el.querySelector("[data-body]");
+        if (body?.querySelector('input[type=range]:focus')) continue;
         if (body) await renderWidgetContent(widget, body);
       }
       setMsg("Updated " + new Date().toLocaleTimeString());
@@ -879,8 +1087,7 @@
         await fetchDevices();
         setMsg(`${devices.length} devices loaded`);
         if (editingWidgetId) {
-          const widget = dashboard.widgets.find((w) => w.id === editingWidgetId);
-          if (widget) renderDevicePicker(widget.config.deviceIds || []);
+          renderDevicePicker();
         }
       } catch (e) {
         setMsg(e.message, true);
@@ -911,6 +1118,7 @@
       document.getElementById("widgetDialog").close();
     };
     document.getElementById("wSave").onclick = () => applyWidgetEditor();
+    els.deviceSearch.oninput = () => renderDevicePicker();
 
     (async function init() {
       loadStoredCfg();
