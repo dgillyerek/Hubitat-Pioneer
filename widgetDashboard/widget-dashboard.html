@@ -400,8 +400,9 @@
   </dialog>
 
   <script>
-    const WIDGET_DASHBOARD_VERSION = "1.0.7";
+    const WIDGET_DASHBOARD_VERSION = "1.0.8";
     const STORAGE_KEY = "widget.dashboard.cfg";
+    const LAYOUT_KEY = "widget.dashboard.layout";
     const NORMAL_REFRESH_MS = 8000;
     const FAST_REFRESH_MS = 1500;
     const FAST_REFRESH_DURATION_MS = 12000;
@@ -549,6 +550,49 @@
       if (!res.ok) throw new Error(`${command} failed (${res.status})`);
     }
 
+    function persistLayout() {
+      try {
+        sessionStorage.setItem(LAYOUT_KEY, JSON.stringify(dashboard));
+      } catch (e) { /* ignore quota */ }
+    }
+
+    function restoreLayoutIfNeeded() {
+      try {
+        const raw = sessionStorage.getItem(LAYOUT_KEY);
+        if (!raw) return;
+        const saved = JSON.parse(raw);
+        const savedCount = saved.widgets?.length ?? 0;
+        const currentCount = dashboard.widgets?.length ?? 0;
+        if (savedCount > currentCount) {
+          dashboard = saved;
+        }
+      } catch (e) { /* ignore */ }
+    }
+
+    function syncLayoutPositionsFromDom() {
+      dashboard.widgets.forEach((w) => {
+        const el = els.canvas.querySelector(`.widget[data-id="${w.id}"]`);
+        if (!el) return;
+        w.x = parseInt(el.style.left, 10) || w.x;
+        w.y = parseInt(el.style.top, 10) || w.y;
+        w.w = parseInt(el.style.width, 10) || w.w;
+        w.h = parseInt(el.style.height, 10) || w.h;
+      });
+    }
+
+    function getLayoutForSave() {
+      restoreLayoutIfNeeded();
+      syncLayoutPositionsFromDom();
+      const domCount = els.canvas.querySelectorAll(".widget").length;
+      if (dashboard.widgets.length === 0 && domCount > 0) {
+        throw new Error("Layout state was lost — reload the page and try again, or use Export JSON");
+      }
+      return {
+        version: dashboard.version || 1,
+        widgets: dashboard.widgets.map((w) => JSON.parse(JSON.stringify(w)))
+      };
+    }
+
     function applyConfigData(data, includeDashboard) {
       cfg.hubIp = data.hubIp || cfg.hubIp;
       cfg.makerAppId = data.makerAppId || cfg.makerAppId;
@@ -565,6 +609,7 @@
         const current = dashboard.widgets || [];
         if (incoming.length > 0 || current.length === 0) {
           dashboard = data.dashboard;
+          persistLayout();
         }
       }
       saveStoredCfg();
@@ -614,8 +659,8 @@
       }
     }
 
-    function encodeLayoutParam() {
-      const json = JSON.stringify({ dashboard });
+    function encodeLayoutParam(layout) {
+      const json = JSON.stringify({ dashboard: layout });
       return encodeURIComponent(btoa(unescape(encodeURIComponent(json))));
     }
 
@@ -644,11 +689,18 @@
     }
 
     async function saveConfigToHub() {
-      await refreshAppCredentials();
+      const layout = getLayoutForSave();
+      const widgetCount = layout.widgets.length;
+      if (widgetCount === 0) {
+        throw new Error("No widgets to save — add a widget first");
+      }
+
+      if (!cfg.appAccessToken) {
+        await refreshAppCredentials();
+      }
       validateSaveCredentials();
 
-      const widgetCount = dashboard.widgets?.length ?? 0;
-      const payload = { dashboard };
+      const payload = { dashboard: layout };
       const attempts = [
         ["POST JSON", appConfigUrl(), {
           method: "POST",
@@ -660,7 +712,7 @@
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: `dashboard=${encodeURIComponent(JSON.stringify(payload))}`
         }],
-        ["GET", appConfigUrl(`layout=${encodeLayoutParam()}`), { method: "GET" }]
+        ["GET", appConfigUrl(`layout=${encodeLayoutParam(layout)}`), { method: "GET" }]
       ];
 
       let lastError = null;
@@ -669,7 +721,10 @@
           const result = await trySaveRequest(label, url, options, widgetCount);
           if (result.dashboard?.widgets?.length) {
             dashboard = result.dashboard;
+          } else {
+            dashboard = layout;
           }
+          persistLayout();
           dirty = false;
           updateSaveBtn();
           return result;
@@ -773,6 +828,7 @@
 
     function markDirty() {
       dirty = true;
+      persistLayout();
       updateSaveBtn();
     }
 
@@ -812,6 +868,7 @@
         h: template.defaultH,
         config: JSON.parse(JSON.stringify(template.defaultConfig))
       });
+      persistLayout();
       markDirty();
       renderAllWidgets();
       openWidgetEditor(dashboard.widgets[dashboard.widgets.length - 1].id);
@@ -1283,6 +1340,7 @@
     (async function init() {
       loadStoredCfg();
       await loadConfigFile();
+      restoreLayoutIfNeeded();
       els.hubLabel.textContent = cfg.hubIp
         ? `Hub ${cfg.hubIp} · v${WIDGET_DASHBOARD_VERSION}`
         : "Open via hub /local/ URL";
