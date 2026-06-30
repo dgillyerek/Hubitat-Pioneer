@@ -29,7 +29,7 @@ preferences {
     page(name: "mainPage")
 }
 
-@Field static final String APP_VERSION          = "1.0.3"
+@Field static final String APP_VERSION          = "1.0.4"
 @Field static final String DASHBOARD_FILENAME   = "widget-dashboard.html"
 @Field static final String CONFIG_FILENAME       = "widget-dashboard-config.json"
 @Field static final String DEFAULT_DASHBOARD_URL = "https://raw.githubusercontent.com/dgillyerek/Hubitat-Pioneer/main/widgetDashboard/widget-dashboard.html"
@@ -244,13 +244,18 @@ def saveConfig() {
                    data: JsonOutput.toJson([error: "Missing dashboard JSON body"])
             return
         }
-        if (body.dashboard != null) {
-            state.dashboardConfigJson = JsonOutput.toJson(body.dashboard)
+        def layout = extractDashboardLayout(body)
+        if (!layout) {
+            render status: 400, contentType: "application/json", headers: CORS_HEADERS,
+                   data: JsonOutput.toJson([error: "Missing dashboard layout in request body"])
+            return
         }
+        state.dashboardConfigJson = JsonOutput.toJson(layout)
         writeConfigFile()
+        def saved = loadDashboardConfig()
         log.info "Widget Dashboard config saved (${countWidgets()} widgets)"
         render contentType: "application/json", headers: CORS_HEADERS,
-               data: JsonOutput.toJson([ok: true, widgets: countWidgets()])
+               data: JsonOutput.toJson([ok: true, widgets: countWidgets(), dashboard: saved])
     } catch (e) {
         log.warn "Widget Dashboard saveConfig failed: ${e.message}"
         render status: 500, contentType: "application/json", headers: CORS_HEADERS,
@@ -264,6 +269,16 @@ private Boolean isSaveAuthorized() {
         return true
     }
     return params?.saveKey?.toString() == expected
+}
+
+private Map extractDashboardLayout(Map body) {
+    if (body?.dashboard instanceof Map) {
+        return body.dashboard
+    }
+    if (body?.widgets instanceof List) {
+        return body
+    }
+    return null
 }
 
 private Map parseSaveRequestBody() {

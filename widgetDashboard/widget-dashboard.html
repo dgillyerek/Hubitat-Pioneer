@@ -400,7 +400,7 @@
   </dialog>
 
   <script>
-    const WIDGET_DASHBOARD_VERSION = "1.0.6";
+    const WIDGET_DASHBOARD_VERSION = "1.0.7";
     const STORAGE_KEY = "widget.dashboard.cfg";
     const NORMAL_REFRESH_MS = 8000;
     const FAST_REFRESH_MS = 1500;
@@ -549,23 +549,33 @@
       if (!res.ok) throw new Error(`${command} failed (${res.status})`);
     }
 
-    async function loadConfigFile() {
+    function applyConfigData(data, includeDashboard) {
+      cfg.hubIp = data.hubIp || cfg.hubIp;
+      cfg.makerAppId = data.makerAppId || cfg.makerAppId;
+      cfg.makerAccessToken = data.makerAccessToken || cfg.makerAccessToken;
+      cfg.appInstallId = data.appInstallId || cfg.appInstallId;
+      if (data.appAccessToken) {
+        cfg.appAccessToken = data.appAccessToken;
+      }
+      if (data.saveKey) {
+        cfg.saveKey = data.saveKey;
+      }
+      if (includeDashboard && data.dashboard) {
+        const incoming = data.dashboard.widgets || [];
+        const current = dashboard.widgets || [];
+        if (incoming.length > 0 || current.length === 0) {
+          dashboard = data.dashboard;
+        }
+      }
+      saveStoredCfg();
+    }
+
+    async function loadConfigFile(includeDashboard = true) {
       try {
         const res = await fetch("./widget-dashboard-config.json?ts=" + Date.now());
         if (!res.ok) return false;
         const data = await res.json();
-        cfg.hubIp = data.hubIp || cfg.hubIp;
-        cfg.makerAppId = data.makerAppId || cfg.makerAppId;
-        cfg.makerAccessToken = data.makerAccessToken || cfg.makerAccessToken;
-        cfg.appInstallId = data.appInstallId || cfg.appInstallId;
-        if (data.appAccessToken) {
-          cfg.appAccessToken = data.appAccessToken;
-        }
-        if (data.saveKey) {
-          cfg.saveKey = data.saveKey;
-        }
-        if (data.dashboard) dashboard = data.dashboard;
-        saveStoredCfg();
+        applyConfigData(data, includeDashboard);
         return true;
       } catch (e) {
         return false;
@@ -573,7 +583,7 @@
     }
 
     async function refreshAppCredentials() {
-      await loadConfigFile();
+      await loadConfigFile(false);
       const manualToken = document.getElementById("cfgAppApiToken")?.value?.trim();
       if (manualToken) {
         cfg.appAccessToken = manualToken;
@@ -609,13 +619,20 @@
       return encodeURIComponent(btoa(unescape(encodeURIComponent(json))));
     }
 
-    async function trySaveRequest(label, url, options) {
+    async function trySaveRequest(label, url, options, expectedWidgets) {
       const res = await fetch(url, options);
       if (!res.ok) {
         const text = await res.text();
         throw new Error(`${label} failed (${res.status}): ${parseSaveError(text)}`);
       }
-      return res.json();
+      const data = await res.json();
+      if (data?.ok !== true) {
+        throw new Error(`${label} failed: unexpected response`);
+      }
+      if (expectedWidgets > 0 && (data.widgets ?? 0) === 0) {
+        throw new Error(`${label} failed: hub saved 0 widgets (expected ${expectedWidgets})`);
+      }
+      return data;
     }
 
     function parseSaveError(text) {
@@ -630,6 +647,7 @@
       await refreshAppCredentials();
       validateSaveCredentials();
 
+      const widgetCount = dashboard.widgets?.length ?? 0;
       const payload = { dashboard };
       const attempts = [
         ["POST JSON", appConfigUrl(), {
@@ -648,10 +666,13 @@
       let lastError = null;
       for (const [label, url, options] of attempts) {
         try {
-          await trySaveRequest(label, url, options);
+          const result = await trySaveRequest(label, url, options, widgetCount);
+          if (result.dashboard?.widgets?.length) {
+            dashboard = result.dashboard;
+          }
           dirty = false;
           updateSaveBtn();
-          return;
+          return result;
         } catch (e) {
           lastError = e;
         }
@@ -1193,9 +1214,10 @@
 
     els.saveBtn.onclick = async () => {
       try {
-        await saveConfigToHub();
-        setMsg("Layout saved to Hubitat");
-        await loadConfigFile();
+        const result = await saveConfigToHub();
+        renderAllWidgets();
+        const count = result.widgets ?? dashboard.widgets?.length ?? 0;
+        setMsg(`Layout saved (${count} widget${count === 1 ? "" : "s"})`);
       } catch (e) {
         setMsg(e.message, true);
       }
