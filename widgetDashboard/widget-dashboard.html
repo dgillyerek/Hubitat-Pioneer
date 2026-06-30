@@ -393,7 +393,7 @@
   </dialog>
 
   <script>
-    const WIDGET_DASHBOARD_VERSION = "1.0.4";
+    const WIDGET_DASHBOARD_VERSION = "1.0.5";
     const STORAGE_KEY = "widget.dashboard.cfg";
     const NORMAL_REFRESH_MS = 8000;
     const FAST_REFRESH_MS = 1500;
@@ -579,35 +579,81 @@
       if (!cfg.hubIp || !cfg.makerAccessToken || !cfg.makerAppId) {
         throw new Error("Configure Maker API credentials");
       }
-      const res = await fetch(devicesUrl());
-      if (!res.ok) throw new Error(`Devices list failed (${res.status})`);
-      const data = await res.json();
+      const q = `access_token=${encodeURIComponent(cfg.makerAccessToken)}`;
+      const urls = [
+        `${apiBase()}/devices/all?${q}`,
+        `${apiBase()}/devices?${q}`
+      ];
+      let data = null;
+      for (const url of urls) {
+        const res = await fetch(url);
+        if (res.ok) {
+          data = await res.json();
+          break;
+        }
+      }
+      if (!data) throw new Error("Devices list failed — check Maker API credentials");
       devices = Array.isArray(data) ? data : [];
       devices.sort((a, b) => String(a.label || a.name || "").localeCompare(String(b.label || b.name || "")));
       return devices;
     }
 
-    function deviceLabel(d) {
-      return d.label || d.name || `Device ${d.id}`;
-    }
-
-    function deviceHasCapability(d, capName) {
-      const caps = d.capabilities;
-      if (!Array.isArray(caps)) return false;
-      const target = capName.toLowerCase();
-      return caps.some((c) => {
+    function capabilityNames(d) {
+      if (!Array.isArray(d?.capabilities)) return null;
+      return d.capabilities.map((c) => {
         const name = typeof c === "string" ? c : c?.name || c?.capability;
-        return String(name).toLowerCase() === target;
+        return String(name).toLowerCase();
       });
     }
 
+    function commandNames(d) {
+      if (!Array.isArray(d?.commands)) return [];
+      return d.commands.map((c) => {
+        const name = typeof c === "string" ? c : c?.command || c?.name;
+        return String(name).toLowerCase();
+      });
+    }
+
+    function deviceTypeHint(d) {
+      return String(d?.type || "").toLowerCase();
+    }
+
+    function isSparseDeviceSummary(d) {
+      return capabilityNames(d) === null &&
+        commandNames(d).length === 0 &&
+        Object.keys(collectAttributes(d)).length === 0;
+    }
+
+    function deviceHasCapability(d, capName) {
+      const caps = capabilityNames(d);
+      if (!caps) return false;
+      return caps.includes(capName.toLowerCase());
+    }
+
     function deviceHasSwitchCapability(d) {
-      return deviceHasCapability(d, "switch");
+      if (deviceHasCapability(d, "switch")) return true;
+      const cmds = commandNames(d);
+      if (cmds.includes("on") || cmds.includes("off")) return true;
+      const attrs = collectAttributes(d);
+      if (attrs.switch != null) return true;
+      if (isSparseDeviceSummary(d)) return true;
+      return false;
     }
 
     function deviceHasDimmerCapability(d) {
-      return deviceHasSwitchCapability(d) &&
-        (deviceHasCapability(d, "switchlevel") || deviceHasCapability(d, "changelevel"));
+      if (deviceHasCapability(d, "switchlevel") || deviceHasCapability(d, "changelevel")) return true;
+      if (commandNames(d).includes("setlevel")) return true;
+      if (collectAttributes(d).level != null) return true;
+      const type = deviceTypeHint(d);
+      if (type.includes("dimmer") || type.includes("dimmable")) return true;
+      if (isSparseDeviceSummary(d) && (type.includes("dimmer") || type.includes("dimmable") || type.includes("light"))) {
+        return true;
+      }
+      return false;
+    }
+
+    function deviceLabel(d) {
+      return d.label || d.name || `Device ${d.id}`;
     }
 
     function pickerDeviceFilter(widgetType) {
@@ -703,8 +749,14 @@
       const filterFn = pickerDeviceFilter(widget?.type || "switches");
       const query = els.deviceSearch.value.trim().toLowerCase();
       const eligibleDevices = devices.filter(filterFn);
-      if (!eligibleDevices.length) {
+      if (!devices.length) {
         els.devicePicker.innerHTML = '<div class="widget-empty">No devices loaded — click Refresh devices</div>';
+        els.devicePickerMeta.textContent = "";
+        return;
+      }
+      if (!eligibleDevices.length) {
+        const kind = widget?.type === "dimmers" ? "dimmer" : "switch";
+        els.devicePicker.innerHTML = `<div class="widget-empty">No ${kind} devices matched (${devices.length} devices loaded). Try Refresh devices.</div>`;
         els.devicePickerMeta.textContent = "";
         return;
       }
