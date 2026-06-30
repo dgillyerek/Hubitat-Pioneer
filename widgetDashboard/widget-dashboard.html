@@ -355,7 +355,8 @@
       </div>
       <div class="field">
         <label for="cfgAppId">Maker API App ID</label>
-        <input id="cfgAppId" type="text" placeholder="1" />
+        <input id="cfgAppId" type="text" placeholder="From Settings → Maker API" />
+        <small style="color:var(--muted);font-size:0.72rem">Controls devices (on/off, dim, etc.)</small>
       </div>
       <div class="field">
         <label for="cfgToken">Maker API Access Token</label>
@@ -363,7 +364,13 @@
       </div>
       <div class="field">
         <label for="cfgInstallId">Widget Dashboard App Install ID</label>
-        <input id="cfgInstallId" type="text" placeholder="From Hubitat app status page" />
+        <input id="cfgInstallId" type="text" placeholder="From Widget Dashboard app status (not Maker API ID)" />
+        <small style="color:var(--muted);font-size:0.72rem">Used for Save to Hub — usually different from Maker API App ID</small>
+      </div>
+      <div class="field">
+        <label for="cfgAppApiToken">Widget App API Token</label>
+        <input id="cfgAppApiToken" type="password" autocomplete="off" placeholder="From widget-dashboard-config.json → appAccessToken" />
+        <small style="color:var(--muted);font-size:0.72rem">Not the Maker API token — reload config file or copy from Hubitat app status</small>
       </div>
       <div class="dialog-actions">
         <button type="button" class="btn-sm" id="cfgCancel">Cancel</button>
@@ -393,7 +400,7 @@
   </dialog>
 
   <script>
-    const WIDGET_DASHBOARD_VERSION = "1.0.5";
+    const WIDGET_DASHBOARD_VERSION = "1.0.6";
     const STORAGE_KEY = "widget.dashboard.cfg";
     const NORMAL_REFRESH_MS = 8000;
     const FAST_REFRESH_MS = 1500;
@@ -423,7 +430,7 @@
       }
     };
 
-    let cfg = { hubIp: "", makerAppId: "", makerAccessToken: "", appInstallId: "", appAccessToken: "" };
+    let cfg = { hubIp: "", makerAppId: "", makerAccessToken: "", appInstallId: "", appAccessToken: "", saveKey: "" };
     let dashboard = { version: 1, widgets: [] };
     let devices = [];
     let editMode = false;
@@ -478,9 +485,15 @@
       return `http://${cfg.hubIp}/apps/api/${cfg.makerAppId}`;
     }
 
-    function appConfigUrl() {
-      const q = `access_token=${encodeURIComponent(cfg.appAccessToken)}`;
-      return `http://${cfg.hubIp}/apps/api/${cfg.appInstallId}/config?${q}`;
+    function appConfigUrl(extraParams) {
+      const parts = [`access_token=${encodeURIComponent(cfg.appAccessToken)}`];
+      if (cfg.saveKey) {
+        parts.push(`saveKey=${encodeURIComponent(cfg.saveKey)}`);
+      }
+      if (extraParams) {
+        parts.push(extraParams);
+      }
+      return `http://${cfg.hubIp}/apps/api/${cfg.appInstallId}/config?${parts.join("&")}`;
     }
 
     function deviceUrl(deviceId) {
@@ -545,7 +558,12 @@
         cfg.makerAppId = data.makerAppId || cfg.makerAppId;
         cfg.makerAccessToken = data.makerAccessToken || cfg.makerAccessToken;
         cfg.appInstallId = data.appInstallId || cfg.appInstallId;
-        cfg.appAccessToken = data.appAccessToken || cfg.appAccessToken;
+        if (data.appAccessToken) {
+          cfg.appAccessToken = data.appAccessToken;
+        }
+        if (data.saveKey) {
+          cfg.saveKey = data.saveKey;
+        }
         if (data.dashboard) dashboard = data.dashboard;
         saveStoredCfg();
         return true;
@@ -554,25 +572,91 @@
       }
     }
 
-    async function saveConfigToHub() {
-      if (!cfg.hubIp || !cfg.appInstallId || !cfg.appAccessToken) {
+    async function refreshAppCredentials() {
+      await loadConfigFile();
+      const manualToken = document.getElementById("cfgAppApiToken")?.value?.trim();
+      if (manualToken) {
+        cfg.appAccessToken = manualToken;
+      }
+    }
+
+    function validateSaveCredentials() {
+      if (!cfg.hubIp || !cfg.appInstallId) {
+        throw new Error("Missing hub IP or Widget Dashboard app install ID — open Settings (⚙)");
+      }
+      if (!cfg.appAccessToken) {
         throw new Error(
-          "API token missing. In Hubitat: Apps Code → Widget Dashboard → OAuth (top right) → enable → Save. " +
-          "Then open the installed app and click Done. Or use Export JSON and import in the app."
+          "Widget App API token missing. This is NOT the Maker API token. " +
+          "Open the Widget Dashboard app in Hubitat → confirm API token shows ready → reload this page. " +
+          "Or paste appAccessToken from /local/widget-dashboard-config.json into Settings."
         );
       }
-      const res = await fetch(appConfigUrl(), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dashboard })
-      });
+      if (cfg.appInstallId === cfg.makerAppId) {
+        throw new Error(
+          "Widget Dashboard install ID matches Maker API App ID — these are usually different numbers. " +
+          "Use the install ID from the Widget Dashboard app status page."
+        );
+      }
+      if (cfg.appAccessToken === cfg.makerAccessToken) {
+        throw new Error(
+          "Widget App API token matches Maker API token — Save to Hub needs appAccessToken from widget-dashboard-config.json, not the Maker API token."
+        );
+      }
+    }
+
+    function encodeLayoutParam() {
+      const json = JSON.stringify({ dashboard });
+      return encodeURIComponent(btoa(unescape(encodeURIComponent(json))));
+    }
+
+    async function trySaveRequest(label, url, options) {
+      const res = await fetch(url, options);
       if (!res.ok) {
         const text = await res.text();
-        throw new Error(`Save failed (${res.status}): ${text.slice(0, 120)}`);
+        throw new Error(`${label} failed (${res.status}): ${parseSaveError(text)}`);
       }
-      dirty = false;
-      updateSaveBtn();
       return res.json();
+    }
+
+    function parseSaveError(text) {
+      const trimmed = text.trim();
+      if (/invalid.*token|oauth|unauthorized/i.test(trimmed)) {
+        return "OAuth token rejected — reload page to refresh appAccessToken, or paste it from widget-dashboard-config.json in Settings";
+      }
+      return trimmed.slice(0, 160);
+    }
+
+    async function saveConfigToHub() {
+      await refreshAppCredentials();
+      validateSaveCredentials();
+
+      const payload = { dashboard };
+      const attempts = [
+        ["POST JSON", appConfigUrl(), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        }],
+        ["POST form", appConfigUrl(), {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: `dashboard=${encodeURIComponent(JSON.stringify(payload))}`
+        }],
+        ["GET", appConfigUrl(`layout=${encodeLayoutParam()}`), { method: "GET" }]
+      ];
+
+      let lastError = null;
+      for (const [label, url, options] of attempts) {
+        try {
+          await trySaveRequest(label, url, options);
+          dirty = false;
+          updateSaveBtn();
+          return;
+        } catch (e) {
+          lastError = e;
+        }
+      }
+      throw lastError || new Error("Save failed");
     }
 
     async function fetchDevices() {
@@ -1151,6 +1235,7 @@
       document.getElementById("cfgAppId").value = cfg.makerAppId;
       document.getElementById("cfgToken").value = cfg.makerAccessToken;
       document.getElementById("cfgInstallId").value = cfg.appInstallId;
+      document.getElementById("cfgAppApiToken").value = cfg.appAccessToken;
       document.getElementById("settingsDialog").showModal();
     };
     document.getElementById("cfgCancel").onclick = () => document.getElementById("settingsDialog").close();
@@ -1159,6 +1244,7 @@
       cfg.makerAppId = document.getElementById("cfgAppId").value.trim() || "1";
       cfg.makerAccessToken = document.getElementById("cfgToken").value.trim();
       cfg.appInstallId = document.getElementById("cfgInstallId").value.trim();
+      cfg.appAccessToken = document.getElementById("cfgAppApiToken").value.trim();
       saveStoredCfg();
       document.getElementById("settingsDialog").close();
       els.hubLabel.textContent = cfg.hubIp ? `Hub ${cfg.hubIp} · v${WIDGET_DASHBOARD_VERSION}` : "Not configured";

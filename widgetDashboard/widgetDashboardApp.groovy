@@ -29,7 +29,7 @@ preferences {
     page(name: "mainPage")
 }
 
-@Field static final String APP_VERSION          = "1.0.2"
+@Field static final String APP_VERSION          = "1.0.3"
 @Field static final String DASHBOARD_FILENAME   = "widget-dashboard.html"
 @Field static final String CONFIG_FILENAME       = "widget-dashboard-config.json"
 @Field static final String DEFAULT_DASHBOARD_URL = "https://raw.githubusercontent.com/dgillyerek/Hubitat-Pioneer/main/widgetDashboard/widget-dashboard.html"
@@ -54,6 +54,10 @@ def preflight() {
 }
 
 def mainPage() {
+    ensureAccessToken()
+    if (state.accessToken) {
+        writeConfigFile()
+    }
     dynamicPage(name: "mainPage", title: "Widget Dashboard", install: true, uninstall: true, refreshInterval: 0) {
         section("Open dashboard") {
             def hubIp = location.hubs[0]?.localIP ?: "your-hub-ip"
@@ -64,9 +68,16 @@ def mainPage() {
         }
 
         section("Maker API") {
-            paragraph "Enable Maker API under Settings. Include the devices you want on the dashboard in the allowed list."
+            paragraph "Used by the dashboard to read devices and send commands (on/off, setLevel, etc.).<br><br>" +
+                "<strong>This is not the same token</strong> as the Widget App API token below."
             input name: "makerAppId", type: "number", title: "Maker API App ID", required: true
             input name: "makerAccessToken", type: "password", title: "Maker API Access Token", required: true
+        }
+
+        section("Dashboard save key (optional)") {
+            paragraph "Optional backup for <strong>Save to Hub</strong>. If OAuth save fails, set a save key here — " +
+                "the dashboard will send it along with the app API token."
+            input name: "dashboardSaveKey", type: "password", title: "Dashboard Save Key", required: false
         }
 
         section("Dashboard file") {
@@ -83,11 +94,13 @@ def mainPage() {
 
         section("API access") {
             paragraph "Required for <strong>Save to Hub</strong> from the dashboard browser UI.<br><br>" +
+                "<strong>This is a separate token</strong> from the Maker API token above.<br><br>" +
                 "<strong>One-time setup in Apps Code:</strong><br>" +
                 "1. Open this app's code under <strong>Apps Code</strong><br>" +
                 "2. Click <strong>OAuth</strong> (top right) and enable OAuth<br>" +
                 "3. Save the app code<br>" +
-                "4. Return here and click <strong>Done</strong>"
+                "4. Return here and click <strong>Done</strong><br><br>" +
+                "The token is written to <code>/local/widget-dashboard-config.json</code> as <code>appAccessToken</code>."
             input "regenToken", "button", title: "Regenerate API access token"
         }
 
@@ -138,6 +151,7 @@ def ensureAccessToken() {
         def token = createAccessToken()
         if (token) {
             state.accessToken = token
+            writeConfigFile()
         }
         if (state.accessToken) {
             log.info "Widget Dashboard API token created"
@@ -208,6 +222,10 @@ def downloadDashboard(Boolean force) {
 }
 
 def getConfig() {
+    if (params?.layout || params?.dashboard) {
+        saveConfig()
+        return
+    }
     writeConfigFile()
     render contentType: "application/json", headers: CORS_HEADERS,
            data: JsonOutput.toJson(buildConfigPayload())
@@ -215,16 +233,15 @@ def getConfig() {
 
 def saveConfig() {
     try {
-        def body = request?.JSON
-        if (!body && request?.postBody) {
-            body = new JsonSlurper().parseText(request.postBody.toString())
+        if (!isSaveAuthorized()) {
+            render status: 401, contentType: "application/json", headers: CORS_HEADERS,
+                   data: JsonOutput.toJson([error: "Unauthorized — dashboard save key mismatch"])
+            return
         }
-        if (!body && request?.body) {
-            body = new JsonSlurper().parseText(request.body.toString())
-        }
+        def body = parseSaveRequestBody()
         if (!body) {
             render status: 400, contentType: "application/json", headers: CORS_HEADERS,
-                   data: JsonOutput.toJson([error: "Missing JSON body"])
+                   data: JsonOutput.toJson([error: "Missing dashboard JSON body"])
             return
         }
         if (body.dashboard != null) {
@@ -239,6 +256,34 @@ def saveConfig() {
         render status: 500, contentType: "application/json", headers: CORS_HEADERS,
                data: JsonOutput.toJson([error: e.message])
     }
+}
+
+private Boolean isSaveAuthorized() {
+    def expected = settings?.dashboardSaveKey?.toString()
+    if (!expected) {
+        return true
+    }
+    return params?.saveKey?.toString() == expected
+}
+
+private Map parseSaveRequestBody() {
+    if (request?.JSON instanceof Map) {
+        return request.JSON
+    }
+    if (params?.dashboard) {
+        return new JsonSlurper().parseText(params.dashboard.toString())
+    }
+    if (params?.layout) {
+        def decoded = new String(params.layout.toString().decodeBase64())
+        return new JsonSlurper().parseText(decoded)
+    }
+    if (request?.postBody) {
+        return new JsonSlurper().parseText(request.postBody.toString())
+    }
+    if (request?.body) {
+        return new JsonSlurper().parseText(request.body.toString())
+    }
+    return null
 }
 
 def getVersion() {
@@ -277,6 +322,8 @@ private Map buildConfigPayload() {
         makerAccessToken: settings?.makerAccessToken?.toString() ?: "",
         appInstallId:     app.id.toString(),
         appAccessToken:   state.accessToken?.toString() ?: "",
+        hasSaveKey:       settings?.dashboardSaveKey ? true : false,
+        saveKey:          settings?.dashboardSaveKey?.toString() ?: "",
         dashboard:        loadDashboardConfig(),
         dashboardVersion: state.dashboardVersion ?: APP_VERSION,
         appVersion:       APP_VERSION
