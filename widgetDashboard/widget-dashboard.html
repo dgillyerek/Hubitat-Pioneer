@@ -199,6 +199,17 @@
     .switch-table .power-col { width: calc(56px * var(--ws)); text-align: center; }
     .switch-table tr:last-child td { border-bottom: none; }
     .switch-name { font-weight: 600; }
+    .widget-columns {
+      display: flex;
+      flex-wrap: nowrap;
+      gap: calc(12px * var(--ws));
+      align-items: flex-start;
+    }
+    .widget-column {
+      flex: 1 1 0;
+      min-width: 0;
+    }
+    .widget-column .switch-table { width: 100%; }
     .status-light {
       width: calc(28px * var(--ws));
       height: calc(28px * var(--ws));
@@ -242,6 +253,23 @@
       font-variant-numeric: tabular-nums;
     }
     .level-control.pending input[type=range] { opacity: 0.5; }
+    .color-cell { width: calc(52px * var(--ws)); text-align: center; }
+    .color-control { display: inline-flex; align-items: center; justify-content: center; }
+    .color-control.pending { opacity: 0.5; }
+    .bulb-color-input {
+      width: calc(40px * var(--ws));
+      height: calc(32px * var(--ws));
+      padding: 0;
+      border: calc(2px * var(--ws)) solid var(--line);
+      border-radius: calc(8px * var(--ws));
+      cursor: pointer;
+      background: transparent;
+    }
+    body.edit-mode .bulb-color-input {
+      cursor: not-allowed;
+      opacity: 0.55;
+      pointer-events: none;
+    }
     .widget-empty { color: var(--muted); font-size: calc(0.82rem * var(--ws)); text-align: center; padding: calc(16px * var(--ws)) calc(8px * var(--ws)); }
     footer {
       flex: 0 0 auto;
@@ -346,6 +374,7 @@
       <select id="addTemplate">
         <option value="switches">Switches (table)</option>
         <option value="dimmers">Dimmers (table + slider)</option>
+        <option value="colorBulbs">Color bulbs (power + dim + color)</option>
       </select>
       <button type="button" class="btn-sm primary" id="addWidgetBtn">Add</button>
       <span style="flex:1"></span>
@@ -413,6 +442,11 @@
         </div>
       </div>
       <div class="field">
+        <label for="wItemsPerColumn">Items per column</label>
+        <input id="wItemsPerColumn" type="number" min="0" max="50" step="1" value="0" />
+        <small style="color:var(--muted);font-size:0.72rem">0 = one column. e.g. 5 starts a new column after 5 items.</small>
+      </div>
+      <div class="field">
         <label for="deviceSearch">Devices</label>
         <input id="deviceSearch" class="device-search" type="search" placeholder="Search lights and switches…" autocomplete="off" />
         <div class="device-list" id="devicePicker"></div>
@@ -426,7 +460,7 @@
   </dialog>
 
   <script>
-    const WIDGET_DASHBOARD_VERSION = "1.0.9";
+    const WIDGET_DASHBOARD_VERSION = "1.2.0";
     const STORAGE_KEY = "widget.dashboard.cfg";
     const LAYOUT_KEY = "widget.dashboard.layout";
     const NORMAL_REFRESH_MS = 8000;
@@ -439,7 +473,7 @@
         defaultW: 320,
         defaultH: 240,
         defaultTitle: "Switches",
-        defaultConfig: { deviceIds: [], attribute: "switch", onCommand: "on", offCommand: "off", textScale: 1 }
+        defaultConfig: { deviceIds: [], attribute: "switch", onCommand: "on", offCommand: "off", textScale: 1, itemsPerColumn: 0 }
       },
       dimmers: {
         label: "Dimmers (table + slider)",
@@ -453,7 +487,24 @@
           onCommand: "on",
           offCommand: "off",
           levelCommand: "setLevel",
-          textScale: 1
+          textScale: 1,
+          itemsPerColumn: 0
+        }
+      },
+      colorBulbs: {
+        label: "Color bulbs (power + dim + color)",
+        defaultW: 520,
+        defaultH: 300,
+        defaultTitle: "Color bulbs",
+        defaultConfig: {
+          deviceIds: [],
+          attribute: "switch",
+          levelAttribute: "level",
+          onCommand: "on",
+          offCommand: "off",
+          levelCommand: "setLevel",
+          textScale: 1,
+          itemsPerColumn: 0
         }
       }
     };
@@ -839,12 +890,26 @@
       return false;
     }
 
+    function deviceHasColorBulbCapability(d) {
+      const cmds = commandNames(d);
+      if (cmds.includes("sethue") || cmds.includes("setrgb") || cmds.includes("setcolor")) return true;
+      if (deviceHasCapability(d, "colorcontrol") || deviceHasCapability(d, "colormode")) return true;
+      const attrs = collectAttributes(d);
+      if (attrs.hue != null || attrs.rgb != null || attrs.color != null) return true;
+      const type = deviceTypeHint(d);
+      if (type.includes("color") && (type.includes("bulb") || type.includes("light"))) return true;
+      if (isSparseDeviceSummary(d) && type.includes("color")) return true;
+      return false;
+    }
+
     function deviceLabel(d) {
       return d.label || d.name || `Device ${d.id}`;
     }
 
     function pickerDeviceFilter(widgetType) {
-      return widgetType === "dimmers" ? deviceHasDimmerCapability : deviceHasSwitchCapability;
+      if (widgetType === "dimmers") return deviceHasDimmerCapability;
+      if (widgetType === "colorBulbs") return deviceHasColorBulbCapability;
+      return deviceHasSwitchCapability;
     }
 
     function parseLevel(attrs) {
@@ -917,9 +982,12 @@
       const scale = getWidgetScale(widget);
       document.getElementById("wTextScale").value = scale;
       updateTextScaleLabel();
+      document.getElementById("wItemsPerColumn").value = widget.config.itemsPerColumn ?? 0;
       document.getElementById("wTitle").placeholder =
+        widget.type === "colorBulbs" ? "Door lamps" :
         widget.type === "dimmers" ? "Kitchen dimmers" : "Living room switches";
       els.deviceSearch.placeholder =
+        widget.type === "colorBulbs" ? "Search color bulbs…" :
         widget.type === "dimmers" ? "Search dimmers and lights…" : "Search lights and switches…";
       els.deviceSearch.value = "";
       renderDevicePicker();
@@ -986,6 +1054,7 @@
       if (!widget) return;
       widget.title = document.getElementById("wTitle").value.trim() || widget.title;
       widget.config.textScale = parseFloat(document.getElementById("wTextScale").value) || 1;
+      widget.config.itemsPerColumn = parseInt(document.getElementById("wItemsPerColumn").value, 10) || 0;
       widget.config.deviceIds = [...pickerSelectedIds];
       markDirty();
       editingWidgetId = null;
@@ -1058,7 +1127,131 @@
         await renderSwitchesWidget(widget, container);
       } else if (widget.type === "dimmers") {
         await renderDimmersWidget(widget, container);
+      } else if (widget.type === "colorBulbs") {
+        await renderColorBulbsWidget(widget, container);
       }
+    }
+
+    function rgbToHex(r, g, b) {
+      const clamp = (n) => Math.min(255, Math.max(0, Math.round(n)));
+      return "#" + [r, g, b].map((x) => clamp(x).toString(16).padStart(2, "0")).join("");
+    }
+
+    function hexToRgb(hex) {
+      const m = String(hex).replace("#", "").match(/^([0-9a-f]{6})$/i);
+      if (!m) return { r: 128, g: 128, b: 128 };
+      const n = parseInt(m[1], 16);
+      return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+    }
+
+    function hsvToHex(h, s, v) {
+      h = ((h % 360) + 360) % 360;
+      s = Math.max(0, Math.min(1, s));
+      v = Math.max(0, Math.min(1, v));
+      const c = v * s;
+      const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+      const m = v - c;
+      let r = 0, g = 0, b = 0;
+      if (h < 60) { r = c; g = x; }
+      else if (h < 120) { r = x; g = c; }
+      else if (h < 180) { g = c; b = x; }
+      else if (h < 240) { g = x; b = c; }
+      else if (h < 300) { r = x; b = c; }
+      else { r = c; b = x; }
+      return rgbToHex((r + m) * 255, (g + m) * 255, (b + m) * 255);
+    }
+
+    function hexToHsv360(hex) {
+      let { r, g, b } = hexToRgb(hex);
+      r /= 255; g /= 255; b /= 255;
+      const max = Math.max(r, g, b);
+      const min = Math.min(r, g, b);
+      const d = max - min;
+      let h = 0;
+      const s = max === 0 ? 0 : d / max;
+      const v = max;
+      if (d !== 0) {
+        switch (max) {
+          case r: h = ((g - b) / d + (g < b ? 6 : 0)) * 60; break;
+          case g: h = ((b - r) / d + 2) * 60; break;
+          default: h = ((r - g) / d + 4) * 60;
+        }
+      }
+      return { h, s, v };
+    }
+
+    function hubitatHsToHex(hue, saturation, level) {
+      const h = (Number(hue) / 100) * 360;
+      const s = Number(saturation) / 100;
+      const v = Math.max(0.01, Number(level) / 100);
+      return hsvToHex(h, s, v);
+    }
+
+    function hexToHubitatHs(hex) {
+      const { h, s } = hexToHsv360(hex);
+      return {
+        hue: Math.round(Math.min(100, Math.max(0, h / 3.6))),
+        saturation: Math.round(Math.min(100, Math.max(0, s * 100)))
+      };
+    }
+
+    function parseRgbAttr(raw) {
+      const nums = String(raw || "").match(/\d+/g);
+      if (!nums || nums.length < 3) return null;
+      return { r: +nums[0], g: +nums[1], b: +nums[2] };
+    }
+
+    function parseBulbColorFromAttrs(attrs, level) {
+      let hue = parseInt(attrs.hue, 10);
+      let saturation = parseInt(attrs.saturation, 10);
+      const rgb = parseRgbAttr(attrs.rgb);
+      if (rgb) {
+        return { hex: rgbToHex(rgb.r, rgb.g, rgb.b), hue, saturation };
+      }
+      const colorStr = String(attrs.color || "");
+      if (!Number.isFinite(hue)) {
+        const hm = colorStr.match(/hue:\s*(\d+)/i);
+        if (hm) hue = parseInt(hm[1], 10);
+      }
+      if (!Number.isFinite(saturation)) {
+        const sm = colorStr.match(/saturation:\s*(\d+)/i);
+        if (sm) saturation = parseInt(sm[1], 10);
+      }
+      const lvMatch = colorStr.match(/level:\s*(\d+)/i);
+      const lv = lvMatch ? parseInt(lvMatch[1], 10) : level;
+      if (Number.isFinite(hue) && Number.isFinite(saturation)) {
+        return { hex: hubitatHsToHex(hue, saturation, lv ?? level ?? 100), hue, saturation };
+      }
+      return { hex: "#888888", hue: hue || 0, saturation: saturation || 0 };
+    }
+
+    async function fetchColorBulbRow(deviceId, widget) {
+      let label = `Device ${deviceId}`;
+      let switchVal = null;
+      let level = 0;
+      let colorHex = "#888888";
+      const cached = devices.find((d) => String(d.id) === String(deviceId));
+      if (cached) label = deviceLabel(cached);
+
+      try {
+        const d = await hubGet(deviceId);
+        label = deviceLabel(d);
+        const attrs = collectAttributes(d);
+        switchVal = attrs[(widget.config.attribute || "switch").toLowerCase()];
+        level = parseLevel(attrs);
+        const color = parseBulbColorFromAttrs(attrs, level);
+        colorHex = color.hex;
+      } catch (e) {
+        switchVal = null;
+      }
+
+      return {
+        deviceId,
+        label,
+        isOn: String(switchVal).toLowerCase() === "on",
+        level,
+        colorHex
+      };
     }
 
     async function fetchDeviceRow(deviceId, widget) {
@@ -1086,6 +1279,167 @@
       };
     }
 
+    function getItemsPerColumn(widget) {
+      const n = parseInt(widget.config?.itemsPerColumn, 10);
+      if (!Number.isFinite(n) || n <= 0) return 0;
+      return Math.min(50, Math.max(1, n));
+    }
+
+    function chunkRows(rows, itemsPerColumn) {
+      if (!itemsPerColumn || rows.length <= itemsPerColumn) {
+        return [rows];
+      }
+      const chunks = [];
+      for (let i = 0; i < rows.length; i += itemsPerColumn) {
+        chunks.push(rows.slice(i, i + itemsPerColumn));
+      }
+      return chunks;
+    }
+
+    function renderWidgetColumnsHtml(chunks, renderTable) {
+      if (chunks.length === 1) {
+        return renderTable(chunks[0]);
+      }
+      return `<div class="widget-columns">${chunks.map((chunk) => `<div class="widget-column">${renderTable(chunk)}</div>`).join("")}</div>`;
+    }
+
+    function renderSwitchRowsHtml(rows) {
+      return rows.map((r) => `
+        <tr>
+          <td class="switch-name">${escapeHtml(r.label)}</td>
+          <td class="power-col"><button type="button" class="status-light ${r.isOn ? "on" : ""}" data-device="${r.deviceId}" aria-label="Toggle ${escapeHtml(r.label)}"></button></td>
+        </tr>
+      `).join("");
+    }
+
+    function renderSwitchTableHtml(rows) {
+      return `
+        <table class="switch-table">
+          <thead><tr><th>Name</th><th class="power-col">Status</th></tr></thead>
+          <tbody>${renderSwitchRowsHtml(rows)}</tbody>
+        </table>
+      `;
+    }
+
+    function renderDimmerRowsHtml(rows) {
+      return rows.map((r) => `
+        <tr data-device="${r.deviceId}">
+          <td class="switch-name">${escapeHtml(r.label)}</td>
+          <td class="power-col"><button type="button" class="status-light ${r.isOn ? "on" : ""}" data-device="${r.deviceId}" aria-label="Toggle ${escapeHtml(r.label)}"></button></td>
+          <td class="level-cell">
+            <div class="level-control">
+              <input type="range" min="0" max="100" step="1" value="${r.level}" data-device="${r.deviceId}" aria-label="Dim ${escapeHtml(r.label)}" />
+              <span class="level-readout">${r.level}%</span>
+            </div>
+          </td>
+        </tr>
+      `).join("");
+    }
+
+    function renderDimmerTableHtml(rows) {
+      return `
+        <table class="switch-table">
+          <thead><tr><th>Name</th><th class="power-col">Power</th><th class="level-cell">Level</th></tr></thead>
+          <tbody>${renderDimmerRowsHtml(rows)}</tbody>
+        </table>
+      `;
+    }
+
+    function renderColorBulbRowsHtml(rows) {
+      return rows.map((r) => `
+        <tr data-device="${r.deviceId}">
+          <td class="switch-name">${escapeHtml(r.label)}</td>
+          <td class="power-col"><button type="button" class="status-light ${r.isOn ? "on" : ""}" data-device="${r.deviceId}" aria-label="Toggle ${escapeHtml(r.label)}"></button></td>
+          <td class="level-cell">
+            <div class="level-control">
+              <input type="range" min="0" max="100" step="1" value="${r.level}" data-device="${r.deviceId}" aria-label="Dim ${escapeHtml(r.label)}" />
+              <span class="level-readout">${r.level}%</span>
+            </div>
+          </td>
+          <td class="color-cell">
+            <div class="color-control">
+              <input type="color" class="bulb-color-input" value="${escapeHtml(r.colorHex)}" data-device="${r.deviceId}" aria-label="Color ${escapeHtml(r.label)}" />
+            </div>
+          </td>
+        </tr>
+      `).join("");
+    }
+
+    function renderColorBulbTableHtml(rows) {
+      return `
+        <table class="switch-table">
+          <thead><tr><th>Name</th><th class="power-col">Power</th><th class="level-cell">Level</th><th class="color-cell">Color</th></tr></thead>
+          <tbody>${renderColorBulbRowsHtml(rows)}</tbody>
+        </table>
+      `;
+    }
+
+    function bindSwitchWidgetEvents(container, widget) {
+      if (editMode) return;
+      container.querySelectorAll(".status-light").forEach((btn) => {
+        btn.onclick = () => toggleSwitch(btn, widget);
+      });
+    }
+
+    function bindDimmerWidgetEvents(container, widget, activeDeviceId, activeSliderValue) {
+      if (editMode) return;
+      container.querySelectorAll(".status-light").forEach((btn) => {
+        btn.onclick = () => toggleSwitch(btn, widget);
+      });
+      container.querySelectorAll('input[type=range]').forEach((slider) => {
+        const row = slider.closest("tr");
+        const readout = row.querySelector(".level-readout");
+        const light = row.querySelector(".status-light");
+        slider.oninput = () => {
+          readout.textContent = `${slider.value}%`;
+        };
+        slider.onchange = () => setDeviceLevel(slider, light, widget);
+      });
+      if (activeDeviceId) {
+        const slider = container.querySelector(`input[type=range][data-device="${activeDeviceId}"]`);
+        if (slider) {
+          slider.focus();
+          slider.value = activeSliderValue;
+          slider.closest("tr").querySelector(".level-readout").textContent = `${slider.value}%`;
+        }
+      }
+    }
+
+    function bindColorBulbWidgetEvents(container, widget, activeDeviceId, activeSliderValue, activeColorDeviceId, activeColorValue) {
+      if (editMode) return;
+      container.querySelectorAll(".status-light").forEach((btn) => {
+        btn.onclick = () => toggleSwitch(btn, widget);
+      });
+      container.querySelectorAll('input[type=range]').forEach((slider) => {
+        const row = slider.closest("tr");
+        const readout = row.querySelector(".level-readout");
+        const light = row.querySelector(".status-light");
+        slider.oninput = () => {
+          readout.textContent = `${slider.value}%`;
+        };
+        slider.onchange = () => setDeviceLevel(slider, light, widget);
+      });
+      container.querySelectorAll(".bulb-color-input").forEach((input) => {
+        const row = input.closest("tr");
+        const light = row.querySelector(".status-light");
+        input.onchange = () => setBulbColor(input, widget, light);
+      });
+      if (activeDeviceId) {
+        const slider = container.querySelector(`input[type=range][data-device="${activeDeviceId}"]`);
+        if (slider) {
+          slider.focus();
+          slider.value = activeSliderValue;
+          slider.closest("tr").querySelector(".level-readout").textContent = `${slider.value}%`;
+        }
+      }
+      if (activeColorDeviceId) {
+        const input = container.querySelector(`.bulb-color-input[data-device="${activeColorDeviceId}"]`);
+        if (input) {
+          input.value = activeColorValue;
+        }
+      }
+    }
+
     async function renderSwitchesWidget(widget, container) {
       const ids = widget.config.deviceIds || [];
       if (!ids.length) {
@@ -1098,25 +1452,9 @@
         rows.push(await fetchDeviceRow(deviceId, widget));
       }
 
-      container.innerHTML = `
-        <table class="switch-table">
-          <thead><tr><th>Name</th><th class="power-col">Status</th></tr></thead>
-          <tbody>
-            ${rows.map((r) => `
-              <tr>
-                <td class="switch-name">${escapeHtml(r.label)}</td>
-                <td class="power-col"><button type="button" class="status-light ${r.isOn ? "on" : ""}" data-device="${r.deviceId}" aria-label="Toggle ${escapeHtml(r.label)}"></button></td>
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
-      `;
-
-      if (!editMode) {
-        container.querySelectorAll(".status-light").forEach((btn) => {
-          btn.onclick = () => toggleSwitch(btn, widget);
-        });
-      }
+      const chunks = chunkRows(rows, getItemsPerColumn(widget));
+      container.innerHTML = renderWidgetColumnsHtml(chunks, renderSwitchTableHtml);
+      bindSwitchWidgetEvents(container, widget);
     }
 
     async function renderDimmersWidget(widget, container) {
@@ -1128,55 +1466,70 @@
 
       const activeSlider = container.querySelector('input[type=range]:focus');
       const activeDeviceId = activeSlider?.dataset.device;
+      const activeSliderValue = activeSlider?.value;
 
       const rows = [];
       for (const deviceId of ids) {
         rows.push(await fetchDeviceRow(deviceId, widget));
       }
 
-      container.innerHTML = `
-        <table class="switch-table">
-          <thead><tr><th>Name</th><th class="power-col">Power</th><th class="level-cell">Level</th></tr></thead>
-          <tbody>
-            ${rows.map((r) => `
-              <tr data-device="${r.deviceId}">
-                <td class="switch-name">${escapeHtml(r.label)}</td>
-                <td class="power-col"><button type="button" class="status-light ${r.isOn ? "on" : ""}" data-device="${r.deviceId}" aria-label="Toggle ${escapeHtml(r.label)}"></button></td>
-                <td class="level-cell">
-                  <div class="level-control">
-                    <input type="range" min="0" max="100" step="1" value="${r.level}" data-device="${r.deviceId}" aria-label="Dim ${escapeHtml(r.label)}" />
-                    <span class="level-readout">${r.level}%</span>
-                  </div>
-                </td>
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
-      `;
+      const chunks = chunkRows(rows, getItemsPerColumn(widget));
+      container.innerHTML = renderWidgetColumnsHtml(chunks, renderDimmerTableHtml);
+      bindDimmerWidgetEvents(container, widget, activeDeviceId, activeSliderValue);
+    }
 
-      if (!editMode) {
-        container.querySelectorAll(".status-light").forEach((btn) => {
-          btn.onclick = () => toggleSwitch(btn, widget);
-        });
-        container.querySelectorAll('input[type=range]').forEach((slider) => {
-          const row = slider.closest("tr");
-          const readout = row.querySelector(".level-readout");
-          const light = row.querySelector(".status-light");
+    async function renderColorBulbsWidget(widget, container) {
+      const ids = widget.config.deviceIds || [];
+      if (!ids.length) {
+        container.innerHTML = '<div class="widget-empty">No devices selected — configure this widget</div>';
+        return;
+      }
 
-          slider.oninput = () => {
-            readout.textContent = `${slider.value}%`;
-          };
-          slider.onchange = () => setDeviceLevel(slider, light, widget);
-        });
+      const activeSlider = container.querySelector('input[type=range]:focus');
+      const activeDeviceId = activeSlider?.dataset.device;
+      const activeSliderValue = activeSlider?.value;
+      const activeColor = container.querySelector('input[type=color]:focus');
+      const activeColorDeviceId = activeColor?.dataset.device;
+      const activeColorValue = activeColor?.value;
 
-        if (activeDeviceId) {
-          const slider = container.querySelector(`input[type=range][data-device="${activeDeviceId}"]`);
-          if (slider) {
-            slider.focus();
-            slider.value = activeSlider.value;
-            slider.closest("tr").querySelector(".level-readout").textContent = `${slider.value}%`;
-          }
+      const rows = [];
+      for (const deviceId of ids) {
+        rows.push(await fetchColorBulbRow(deviceId, widget));
+      }
+
+      const chunks = chunkRows(rows, getItemsPerColumn(widget));
+      container.innerHTML = renderWidgetColumnsHtml(chunks, renderColorBulbTableHtml);
+      bindColorBulbWidgetEvents(container, widget, activeDeviceId, activeSliderValue, activeColorDeviceId, activeColorValue);
+    }
+
+    async function setBulbColor(input, widget, lightEl) {
+      const deviceId = input.dataset.device;
+      const hex = input.value;
+      const wrap = input.closest(".color-control");
+      wrap?.classList.add("pending");
+      try {
+        const dev = devices.find((d) => String(d.id) === String(deviceId));
+        const cmds = dev ? commandNames(dev) : [];
+        const { r, g, b } = hexToRgb(hex);
+        const { hue, saturation } = hexToHubitatHs(hex);
+
+        if (lightEl && !lightEl.classList.contains("on")) {
+          await hubCmd(deviceId, widget.config.onCommand || "on");
+          lightEl.classList.add("on");
         }
+
+        if (cmds.includes("setrgb")) {
+          await hubCmd(deviceId, "setRGB", `${r},${g},${b}`);
+        } else {
+          await hubCmd(deviceId, "setHue", hue);
+          await hubCmd(deviceId, "setSaturation", saturation);
+        }
+        setMsg(`Color updated — ${deviceId}`);
+        burstRefresh();
+      } catch (e) {
+        setMsg(e.message, true);
+      } finally {
+        wrap?.classList.remove("pending");
       }
     }
 
@@ -1288,7 +1641,7 @@
         const el = els.canvas.querySelector(`.widget[data-id="${widget.id}"]`);
         if (!el) continue;
         const body = el.querySelector("[data-body]");
-        if (body?.querySelector('input[type=range]:focus')) continue;
+        if (body?.querySelector('input[type=range]:focus, input[type=color]:focus')) continue;
         if (body) await renderWidgetContent(widget, body);
       }
       setMsg("Updated " + new Date().toLocaleTimeString());
